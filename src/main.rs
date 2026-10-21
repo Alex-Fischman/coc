@@ -266,20 +266,10 @@ fn test_sexpify() -> Result<()> {
 enum Ast {
     Type(Span),
     Prop(Span),
-    Var(Span, String),
+    Var(Span),
     App(Span, Box<Ast>, Box<Ast>),
-    Lambda {
-        span: Span,
-        var: String,
-        arg: Box<Ast>,
-        ret: Box<Ast>,
-    },
-    Forall {
-        span: Span,
-        var: String,
-        arg: Box<Ast>,
-        ret: Box<Ast>,
-    },
+    Lambda(Span, Span, Box<Ast>, Box<Ast>),
+    Forall(Span, Span, Box<Ast>, Box<Ast>),
 }
 
 #[cfg(test)]
@@ -293,8 +283,8 @@ fn prop(lo: usize, hi: usize) -> Ast {
 }
 
 #[cfg(test)]
-fn var(lo: usize, hi: usize, var: &str) -> Ast {
-    Ast::Var(Span { lo, hi }, var.to_owned())
+fn var(lo: usize, hi: usize) -> Ast {
+    Ast::Var(Span { lo, hi })
 }
 
 #[cfg(test)]
@@ -303,23 +293,29 @@ fn app(lo: usize, hi: usize, f: Ast, x: Ast) -> Ast {
 }
 
 #[cfg(test)]
-fn lambda(lo: usize, hi: usize, var: &str, arg: Ast, ret: Ast) -> Ast {
-    Ast::Lambda {
-        span: Span { lo, hi },
-        var: var.to_owned(),
-        arg: Box::new(arg),
-        ret: Box::new(ret),
-    }
+fn lambda((lo, hi): (usize, usize), (var_lo, var_hi): (usize, usize), arg: Ast, ret: Ast) -> Ast {
+    Ast::Lambda(
+        Span { lo, hi },
+        Span {
+            lo: var_lo,
+            hi: var_hi,
+        },
+        Box::new(arg),
+        Box::new(ret),
+    )
 }
 
 #[cfg(test)]
-fn forall(lo: usize, hi: usize, var: &str, arg: Ast, ret: Ast) -> Ast {
-    Ast::Forall {
-        span: Span { lo, hi },
-        var: var.to_owned(),
-        arg: Box::new(arg),
-        ret: Box::new(ret),
-    }
+fn forall((lo, hi): (usize, usize), (var_lo, var_hi): (usize, usize), arg: Ast, ret: Ast) -> Ast {
+    Ast::Forall(
+        Span { lo, hi },
+        Span {
+            lo: var_lo,
+            hi: var_hi,
+        },
+        Box::new(arg),
+        Box::new(ret),
+    )
 }
 
 fn parse(sexp: &Sexp, text: &str) -> Result<Ast> {
@@ -327,7 +323,7 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Ast> {
         Sexp::Atom(span) => match span.string(text) {
             "T" => Ast::Type(*span),
             "P" => Ast::Prop(*span),
-            _ => Ast::Var(*span, span.string(text).to_owned()),
+            _ => Ast::Var(*span),
         },
         Sexp::List(span, list) => match &list[..] {
             [f, x] => Ast::App(*span, Box::new(parse(f, text)?), Box::new(parse(x, text)?)),
@@ -345,19 +341,11 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Ast> {
                 if arrow.string(text) != "->" {
                     return err!(text, span, "expected arrow");
                 }
+                let arg = Box::new(parse(arg, text)?);
+                let ret = Box::new(parse(ret, text)?);
                 match op.string(text) {
-                    "lambda" => Ast::Lambda {
-                        span: *span,
-                        var: var.string(text).to_owned(),
-                        arg: Box::new(parse(arg, text)?),
-                        ret: Box::new(parse(ret, text)?),
-                    },
-                    "forall" => Ast::Forall {
-                        span: *span,
-                        var: var.string(text).to_owned(),
-                        arg: Box::new(parse(arg, text)?),
-                        ret: Box::new(parse(ret, text)?),
-                    },
+                    "lambda" => Ast::Lambda(*span, *var, arg, ret),
+                    "forall" => Ast::Forall(*span, *var, arg, ret),
                     _ => return err!(text, op, "expected lambda or forall"),
                 }
             }
@@ -379,16 +367,15 @@ fn test_parse() -> Result<()> {
         Ok(())
     }
 
-    run_test("a", &[var(0, 1, "a")])?;
-    run_test("(f x)", &[app(0, 5, var(1, 2, "f"), var(3, 4, "x"))])?;
+    run_test("a", &[var(0, 1)])?;
+    run_test("(f x)", &[app(0, 5, var(1, 2), var(3, 4))])?;
     run_test(
         "(lambda x : (forall A : T -> P) -> y)",
         &[lambda(
-            0,
-            37,
-            "x",
-            forall(12, 31, "A", typ(24, 25), prop(29, 30)),
-            var(35, 36, "y"),
+            (0, 37),
+            (8, 9),
+            forall((12, 31), (20, 21), typ(24, 25), prop(29, 30)),
+            var(35, 36),
         )],
     )?;
     assert_eq!(
@@ -399,6 +386,145 @@ fn test_parse() -> Result<()> {
     );
     Ok(())
 }
+
+impl Ast {
+    fn substitute(self, text: &str, key: &str, val: &Ast) -> Ast {
+        match self {
+            Ast::Type(_) | Ast::Prop(_) => self,
+            Ast::Var(var) => {
+                if var.string(text) == key {
+                    val.clone()
+                } else {
+                    self
+                }
+            }
+            Ast::App(span, f, x) => Ast::App(
+                span,
+                Box::new(f.substitute(text, key, val)),
+                Box::new(x.substitute(text, key, val)),
+            ),
+            Ast::Lambda(span, var, arg, ret) => {
+                let arg = Box::new(arg.substitute(text, key, val));
+                let ret = if var.string(text) == key {
+                    ret
+                } else {
+                    Box::new(ret.substitute(text, key, val))
+                };
+                Ast::Lambda(span, var, arg, ret)
+            }
+            Ast::Forall(span, var, arg, ret) => {
+                let arg = Box::new(arg.substitute(text, key, val));
+                let ret = if var.string(text) == key {
+                    ret
+                } else {
+                    Box::new(ret.substitute(text, key, val))
+                };
+                Ast::Forall(span, var, arg, ret)
+            }
+        }
+    }
+
+    fn beta_reduce(self, text: &str) -> Ast {
+        match self {
+            Ast::Type(_) | Ast::Prop(_) | Ast::Var(_) => self,
+            Ast::App(span, f, x) => {
+                let f = f.beta_reduce(text);
+                let x = x.beta_reduce(text);
+                match f {
+                    Ast::Lambda(_, var, _, ret) => {
+                        ret.substitute(text, var.string(text), &x).beta_reduce(text)
+                    }
+                    _ => Ast::App(span, Box::new(f), Box::new(x)),
+                }
+            }
+            Ast::Lambda(span, var, arg, ret) => Ast::Lambda(
+                span,
+                var,
+                Box::new(arg.beta_reduce(text)),
+                Box::new(ret.beta_reduce(text)),
+            ),
+            Ast::Forall(span, var, arg, ret) => Ast::Forall(
+                span,
+                var,
+                Box::new(arg.beta_reduce(text)),
+                Box::new(ret.beta_reduce(text)),
+            ),
+        }
+    }
+
+    fn is_beta_equivalent(text: &str, lhs: Ast, rhs: Ast) -> bool {
+        match (lhs.beta_reduce(text), rhs.beta_reduce(text)) {
+            (Ast::Type(_), Ast::Type(_)) | (Ast::Prop(_), Ast::Prop(_)) => true,
+
+            (Ast::Var(lhs_var), Ast::Var(rhs_var)) => lhs_var.string(text) == rhs_var.string(text),
+
+            (Ast::App(_, lhs_f, lhs_x), Ast::App(_, rhs_f, rhs_x)) => {
+                Self::is_beta_equivalent(text, *lhs_f, *rhs_f)
+                    && Self::is_beta_equivalent(text, *lhs_x, *rhs_x)
+            }
+
+            (
+                Ast::Lambda(_, lhs_var, lhs_arg, lhs_ret),
+                Ast::Lambda(_, rhs_var, rhs_arg, rhs_ret),
+            )
+            | (
+                Ast::Forall(_, lhs_var, lhs_arg, lhs_ret),
+                Ast::Forall(_, rhs_var, rhs_arg, rhs_ret),
+            ) => {
+                Self::is_beta_equivalent(text, *lhs_arg, *rhs_arg)
+                    && Self::is_beta_equivalent(
+                        text,
+                        *lhs_ret,
+                        rhs_ret.substitute(text, rhs_var.string(text), &Ast::Var(lhs_var)),
+                    )
+            }
+
+            _ => false,
+        }
+    }
+
+    fn typecheck_(self, text: &str, context: &mut Vec<(Span, Ast)>) -> Result<Ast> {
+        Ok(match self {
+            Ast::Type(span) => return err!(text, span, "no type for T"),
+            Ast::Prop(span) => Ast::Type(span),
+            Ast::Var(var) => {
+                match context
+                    .iter()
+                    .find(|(key, _)| var.string(text) == key.string(text))
+                {
+                    Some((_, val)) => val.clone(),
+                    None => return err!(text, var, "no type for variable"),
+                }
+            }
+            Ast::App(span, f, x) => {
+                let f_type = f.typecheck_(text, context)?;
+                let x_type = x.clone().typecheck_(text, context)?;
+                match f_type {
+                    Ast::Forall(_, var, arg, ret)
+                        if Self::is_beta_equivalent(text, *arg.clone(), x_type.clone()) =>
+                    {
+                        ret.substitute(text, var.string(text), &x)
+                    }
+                    _ => Ast::App(span, Box::new(f_type), Box::new(x_type)),
+                }
+            }
+            Ast::Lambda(span, var, arg, ret) => {
+                context.push((var, *arg.clone()));
+                Ast::Forall(span, var, arg, Box::new(ret.typecheck_(text, context)?))
+            }
+            Ast::Forall(_, var, arg, ret) => {
+                context.push((var, *arg));
+                ret.typecheck_(text, context)?
+            }
+        })
+    }
+
+    fn typecheck(self, text: &str) -> Result<Ast> {
+        self.typecheck_(text, &mut Vec::new())
+    }
+}
+
+// TODO: test `Ast` functions
 
 fn run(text: &str) -> Result<()> {
     let tokens = tokenize(text);

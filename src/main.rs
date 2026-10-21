@@ -22,8 +22,8 @@ struct Span {
 }
 
 impl Span {
-    fn string(&self, source: &str) -> String {
-        source[self.lo..self.hi].to_owned()
+    fn string<'a>(&self, text: &'a str) -> &'a str {
+        &text[self.lo..self.hi]
     }
 
     fn location(&self, text: &str) -> String {
@@ -264,14 +264,32 @@ fn test_sexpify() -> Result<()> {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Ast {
+    Type(Span),
+    Prop(Span),
     Var(Span, String),
     App(Span, Box<Ast>, Box<Ast>),
-    Fun {
+    Lambda {
         span: Span,
         var: String,
         arg: Box<Ast>,
         ret: Box<Ast>,
     },
+    Forall {
+        span: Span,
+        var: String,
+        arg: Box<Ast>,
+        ret: Box<Ast>,
+    },
+}
+
+#[cfg(test)]
+fn typ(lo: usize, hi: usize) -> Ast {
+    Ast::Type(Span { lo, hi })
+}
+
+#[cfg(test)]
+fn prop(lo: usize, hi: usize) -> Ast {
+    Ast::Prop(Span { lo, hi })
 }
 
 #[cfg(test)]
@@ -285,8 +303,18 @@ fn app(lo: usize, hi: usize, f: Ast, x: Ast) -> Ast {
 }
 
 #[cfg(test)]
-fn fun(lo: usize, hi: usize, var: &str, arg: Ast, ret: Ast) -> Ast {
-    Ast::Fun {
+fn lambda(lo: usize, hi: usize, var: &str, arg: Ast, ret: Ast) -> Ast {
+    Ast::Lambda {
+        span: Span { lo, hi },
+        var: var.to_owned(),
+        arg: Box::new(arg),
+        ret: Box::new(ret),
+    }
+}
+
+#[cfg(test)]
+fn forall(lo: usize, hi: usize, var: &str, arg: Ast, ret: Ast) -> Ast {
+    Ast::Forall {
         span: Span { lo, hi },
         var: var.to_owned(),
         arg: Box::new(arg),
@@ -296,10 +324,15 @@ fn fun(lo: usize, hi: usize, var: &str, arg: Ast, ret: Ast) -> Ast {
 
 fn parse(sexp: &Sexp, text: &str) -> Result<Ast> {
     Ok(match sexp {
-        Sexp::Atom(span) => Ast::Var(*span, span.string(text)),
+        Sexp::Atom(span) => match span.string(text) {
+            "T" => Ast::Type(*span),
+            "P" => Ast::Prop(*span),
+            _ => Ast::Var(*span, span.string(text).to_owned()),
+        },
         Sexp::List(span, list) => match &list[..] {
             [f, x] => Ast::App(*span, Box::new(parse(f, text)?), Box::new(parse(x, text)?)),
             [
+                Sexp::Atom(op),
                 Sexp::Atom(var),
                 Sexp::Atom(colon),
                 arg,
@@ -312,11 +345,20 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Ast> {
                 if arrow.string(text) != "->" {
                     return err!(text, span, "expected arrow");
                 }
-                Ast::Fun {
-                    span: *span,
-                    var: var.string(text),
-                    arg: Box::new(parse(arg, text)?),
-                    ret: Box::new(parse(ret, text)?),
+                match op.string(text) {
+                    "lambda" => Ast::Lambda {
+                        span: *span,
+                        var: var.string(text).to_owned(),
+                        arg: Box::new(parse(arg, text)?),
+                        ret: Box::new(parse(ret, text)?),
+                    },
+                    "forall" => Ast::Forall {
+                        span: *span,
+                        var: var.string(text).to_owned(),
+                        arg: Box::new(parse(arg, text)?),
+                        ret: Box::new(parse(ret, text)?),
+                    },
+                    _ => return err!(text, op, "expected lambda or forall"),
                 }
             }
             _ => return err!(text, span, "expected application or abstraction"),
@@ -340,8 +382,14 @@ fn test_parse() -> Result<()> {
     run_test("a", &[var(0, 1, "a")])?;
     run_test("(f x)", &[app(0, 5, var(1, 2, "f"), var(3, 4, "x"))])?;
     run_test(
-        "(x : t -> y)",
-        &[fun(0, 12, "x", var(5, 6, "t"), var(10, 11, "y"))],
+        "(lambda x : (forall A : T -> P) -> y)",
+        &[lambda(
+            0,
+            37,
+            "x",
+            forall(12, 31, "A", typ(24, 25), prop(29, 30)),
+            var(35, 36, "y"),
+        )],
     )?;
     assert_eq!(
         run_test("(x y z)", &[]),
@@ -352,64 +400,12 @@ fn test_parse() -> Result<()> {
     Ok(())
 }
 
-fn substitute(key: &str, val: &Ast, ast: Ast) -> Ast {
-    match ast {
-        Ast::Var(_span, var) if var == key => val.clone(),
-        Ast::Var(_span, _) => ast,
-        Ast::App(span, f, x) => Ast::App(
-            span,
-            Box::new(substitute(key, val, *f)),
-            Box::new(substitute(key, val, *x)),
-        ),
-        Ast::Fun {
-            span,
-            var,
-            arg,
-            ret,
-        } => Ast::Fun {
-            span,
-            var,
-            arg: Box::new(substitute(key, val, *arg)),
-            ret: Box::new(substitute(key, val, *ret)),
-        },
-    }
-}
-
-fn reduce(ast: Ast) -> Ast {
-    match ast {
-        Ast::Var(span, var) => Ast::Var(span, var),
-        Ast::App(span, f, x) => match *f {
-            Ast::Fun {
-                span: _,
-                var,
-                arg: _,
-                ret,
-            } => substitute(&var, &x, *ret),
-            f => Ast::App(span, Box::new(f), x),
-        },
-        Ast::Fun {
-            span,
-            var,
-            arg,
-            ret,
-        } => Ast::Fun {
-            span,
-            var,
-            arg: Box::new(reduce(*arg)),
-            ret: Box::new(reduce(*ret)),
-        },
-    }
-}
-
-// TODO: test `reduce`
-
 fn run(text: &str) -> Result<()> {
     let tokens = tokenize(text);
     let sexps = sexpify(&tokens, text)?;
     let asts = sexps
         .into_iter()
         .map(|sexp| parse(&sexp, text))
-        .map(|result| result.map(reduce))
         .collect::<Result<Vec<_>>>()?;
     println!("{asts:#?}");
     Ok(())

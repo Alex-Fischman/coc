@@ -366,14 +366,14 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
 
 #[test]
 fn test_parse() -> Result<()> {
-    fn run_test(text: &str, expected_asts: &[Expr]) -> Result<()> {
+    fn run_test(text: &str, expected_exprs: &[Expr]) -> Result<()> {
         let tokens = tokenize(text);
         let actual_sexps = sexpify(&tokens, text)?;
-        let actual_asts = actual_sexps
+        let actual_exprs = actual_sexps
             .into_iter()
             .map(|sexp| parse(&sexp, text))
             .collect::<Result<Vec<_>>>()?;
-        assert_eq!(expected_asts, actual_asts);
+        assert_eq!(expected_exprs, actual_exprs);
         Ok(())
     }
 
@@ -495,38 +495,39 @@ impl Expr {
         }
     }
 
-    fn typecheck_(self, text: &str, context: &mut Vec<(Span, Expr)>) -> Result<Expr> {
+    fn typecheck_<'a>(self, text: &'a str, context: &mut Vec<(&'a str, Expr)>) -> Result<Expr> {
         Ok(match self {
             Expr::Type(span) => return err!(text, span, "no type for T"),
             Expr::Prop(span) => Expr::Type(span),
-            Expr::Var(var) => {
-                match context
-                    .iter()
-                    .find(|(key, _)| var.string(text) == key.string(text))
-                {
-                    Some((_, val)) => val.clone(),
-                    None => return err!(text, var, "no type for variable"),
-                }
-            }
+            Expr::Var(var) => match context.iter().find(|(key, _)| var.string(text) == *key) {
+                Some((_, val)) => val.clone(),
+                None => return err!(text, var, "no type for variable"),
+            },
             Expr::App(span, f, x) => {
                 let f_type = f.typecheck_(text, context)?;
                 let x_type = x.clone().typecheck_(text, context)?;
                 match f_type {
-                    Expr::Forall(_, var, arg, ret)
-                        if Self::is_beta_equivalent(text, *arg.clone(), x_type.clone()) =>
-                    {
-                        ret.substitute(text, var.string(text), &x)
+                    Expr::Forall(_, var, arg, ret) => {
+                        if Self::is_beta_equivalent(text, *arg.clone(), x_type.clone()) {
+                            ret.substitute(text, var.string(text), &x)
+                        } else {
+                            return err!(text, span, "wrong type for lambda argument");
+                        }
                     }
-                    _ => Expr::App(span, Box::new(f_type), Box::new(x_type)),
+                    _ => return err!(text, span, "expected forall type"),
                 }
             }
             Expr::Lambda(span, var, arg, ret) => {
-                context.push((var, *arg.clone()));
-                Expr::Forall(span, var, arg, Box::new(ret.typecheck_(text, context)?))
+                context.push((var.string(text), *arg.clone()));
+                let ret = ret.typecheck_(text, context)?;
+                context.pop();
+                Expr::Forall(span, var, arg, Box::new(ret))
             }
             Expr::Forall(_, var, arg, ret) => {
-                context.push((var, *arg));
-                ret.typecheck_(text, context)?
+                context.push((var.string(text), *arg.clone()));
+                let ret = ret.typecheck_(text, context)?;
+                context.pop();
+                ret
             }
         })
     }
@@ -534,18 +535,65 @@ impl Expr {
     fn typecheck(self, text: &str) -> Result<Expr> {
         self.typecheck_(text, &mut Vec::new())
     }
+
+    fn to_string(&self, text: &str) -> String {
+        match self {
+            Expr::Type(_) => String::from("T"),
+            Expr::Prop(_) => String::from("P"),
+            Expr::Var(var) => String::from(var.string(text)),
+            Expr::App(_, f, x) => format!("({} {})", f.to_string(text), x.to_string(text)),
+            Expr::Lambda(_, var, arg, ret) => format!(
+                "(lambda {} : {} -> {})",
+                var.string(text),
+                arg.to_string(text),
+                ret.to_string(text)
+            ),
+            Expr::Forall(_, var, arg, ret) => format!(
+                "(forall {} : {} -> {})",
+                var.string(text),
+                arg.to_string(text),
+                ret.to_string(text)
+            ),
+        }
+    }
 }
 
-// TODO: test `Expr` functions
+#[test]
+fn test_typecheck() -> Result<()> {
+    fn run_test(text: &str, expected_eval: &str, expected_type: &str) -> Result<()> {
+        let tokens = tokenize(text);
+        let sexp = sexpify(&tokens, text)?.remove(0);
+        let expr = parse(&sexp, text)?;
+        let actual_eval = expr.clone().beta_reduce(text).to_string(text);
+        assert_eq!(expected_eval, actual_eval);
+        let actual_type = expr.typecheck(text)?;
+        assert_eq!(expected_type, actual_type.to_string(text));
+        Ok(())
+    }
+
+    run_test("P", "P", "T")?;
+    run_test("(forall x : P -> x)", "(forall x : P -> x)", "P")?;
+    run_test(
+        "(lambda x : P -> x)",
+        "(lambda x : P -> x)",
+        "(forall x : P -> P)",
+    )?;
+    run_test(
+        "((lambda x : P -> x) (forall x : P -> x))",
+        "(forall x : P -> x)",
+        "P",
+    )?;
+    Ok(())
+}
 
 fn run(text: &str) -> Result<()> {
     let tokens = tokenize(text);
     let sexps = sexpify(&tokens, text)?;
-    let asts = sexps
+    let exprs = sexps
         .into_iter()
         .map(|sexp| parse(&sexp, text))
         .collect::<Result<Vec<_>>>()?;
-    println!("{asts:#?}");
+    println!("{exprs:#?}");
     Ok(())
 }
 

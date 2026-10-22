@@ -605,7 +605,7 @@ impl Expr {
         }
     }
 
-    fn typecheck_<'a>(self, text: &'a str, context: &mut Vec<(&'a str, Expr)>) -> Result<Expr> {
+    fn typecheck<'a>(self, text: &'a str, context: &mut Vec<(&'a str, Expr)>) -> Result<Expr> {
         Ok(match self {
             Expr::Type(span) => return err!(text, span, "no type for T"),
             Expr::Prop(span) => Expr::Type(span),
@@ -614,8 +614,8 @@ impl Expr {
                 None => return err!(text, var, "no type for variable"),
             },
             Expr::App(span, f, x) => {
-                let f_type = f.typecheck_(text, context)?;
-                let x_type = x.clone().typecheck_(text, context)?;
+                let f_type = f.typecheck(text, context)?;
+                let x_type = x.clone().typecheck(text, context)?;
                 match f_type {
                     Expr::Forall(_, var, arg, ret) => {
                         if Self::is_beta_equivalent(text, *arg.clone(), x_type.clone()) {
@@ -629,21 +629,17 @@ impl Expr {
             }
             Expr::Lambda(span, var, arg, ret) => {
                 context.push((var.string(text), *arg.clone()));
-                let ret = ret.typecheck_(text, context)?;
+                let ret = ret.typecheck(text, context)?;
                 context.pop();
                 Expr::Forall(span, var, arg, Box::new(ret))
             }
             Expr::Forall(_, var, arg, ret) => {
                 context.push((var.string(text), *arg.clone()));
-                let ret = ret.typecheck_(text, context)?;
+                let ret = ret.typecheck(text, context)?;
                 context.pop();
                 ret
             }
         })
-    }
-
-    fn typecheck(self, text: &str) -> Result<Expr> {
-        self.typecheck_(text, &mut Vec::new())
     }
 
     fn to_string(&self, text: &str) -> String {
@@ -676,7 +672,7 @@ fn test_typecheck() -> Result<()> {
         let expr = parse_expr(&sexp, text)?;
         let actual_eval = expr.clone().beta_reduce(text).to_string(text);
         assert_eq!(expected_eval, actual_eval);
-        let actual_type = expr.typecheck(text)?;
+        let actual_type = expr.typecheck(text, &mut Vec::new())?;
         assert_eq!(expected_type, actual_type.to_string(text));
         Ok(())
     }
@@ -700,6 +696,8 @@ fn test_typecheck() -> Result<()> {
     )?;
     Ok(())
 }
+
+// TODO: add semantics for decls
 
 fn run(text: &str) -> Result<()> {
     let tokens = tokenize(text);

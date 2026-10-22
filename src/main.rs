@@ -272,62 +272,6 @@ enum Expr {
     Forall(Span, Span, Box<Expr>, Box<Expr>),
 }
 
-#[cfg(test)]
-fn typ(lo: usize, hi: usize) -> Expr {
-    Expr::Type(Span { lo, hi })
-}
-
-#[cfg(test)]
-fn prop(lo: usize, hi: usize) -> Expr {
-    Expr::Prop(Span { lo, hi })
-}
-
-#[cfg(test)]
-fn var(lo: usize, hi: usize) -> Expr {
-    Expr::Var(Span { lo, hi })
-}
-
-#[cfg(test)]
-fn app(lo: usize, hi: usize, f: Expr, x: Expr) -> Expr {
-    Expr::App(Span { lo, hi }, Box::new(f), Box::new(x))
-}
-
-#[cfg(test)]
-fn lambda(
-    (lo, hi): (usize, usize),
-    (var_lo, var_hi): (usize, usize),
-    arg: Expr,
-    ret: Expr,
-) -> Expr {
-    Expr::Lambda(
-        Span { lo, hi },
-        Span {
-            lo: var_lo,
-            hi: var_hi,
-        },
-        Box::new(arg),
-        Box::new(ret),
-    )
-}
-
-#[cfg(test)]
-fn forall(
-    (lo, hi): (usize, usize),
-    (var_lo, var_hi): (usize, usize),
-    arg: Expr,
-    ret: Expr,
-) -> Expr {
-    Expr::Forall(
-        Span { lo, hi },
-        Span {
-            lo: var_lo,
-            hi: var_hi,
-        },
-        Box::new(arg),
-        Box::new(ret),
-    )
-}
-
 fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
     Ok(match sexp {
         Sexp::Atom(span) => match span.string(text) {
@@ -359,13 +303,91 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
                     _ => return err!(text, op, "expected lambda or forall"),
                 }
             }
-            _ => return err!(text, span, "expected application or abstraction"),
+            [
+                Sexp::Atom(let_),
+                Sexp::Atom(var),
+                Sexp::Atom(colon),
+                arg,
+                Sexp::Atom(equals),
+                ret,
+                Sexp::Atom(in_),
+                val,
+            ] => {
+                if let_.string(text) != "let" {
+                    return err!(text, span, "expected let");
+                }
+                if colon.string(text) != ":" {
+                    return err!(text, span, "expected colon");
+                }
+                if equals.string(text) != "=" {
+                    return err!(text, span, "expected equals");
+                }
+                if in_.string(text) != "in" {
+                    return err!(text, span, "expected in");
+                }
+                let arg = Box::new(parse(arg, text)?);
+                let ret = Box::new(parse(ret, text)?);
+                let val = Box::new(parse(val, text)?);
+                Expr::App(*span, Box::new(Expr::Lambda(*span, *var, arg, ret)), val)
+            }
+            _ => {
+                return err!(
+                    text,
+                    span,
+                    "expected application, abstraction, or let binding"
+                );
+            }
         },
     })
 }
 
 #[test]
 fn test_parse() -> Result<()> {
+    fn type_(lo: usize, hi: usize) -> Expr {
+        Expr::Type(Span { lo, hi })
+    }
+    fn prop(lo: usize, hi: usize) -> Expr {
+        Expr::Prop(Span { lo, hi })
+    }
+    fn var(lo: usize, hi: usize) -> Expr {
+        Expr::Var(Span { lo, hi })
+    }
+    fn app((lo, hi): (usize, usize), f: Expr, x: Expr) -> Expr {
+        Expr::App(Span { lo, hi }, Box::new(f), Box::new(x))
+    }
+    fn lambda(
+        (lo, hi): (usize, usize),
+        (var_lo, var_hi): (usize, usize),
+        arg: Expr,
+        ret: Expr,
+    ) -> Expr {
+        Expr::Lambda(
+            Span { lo, hi },
+            Span {
+                lo: var_lo,
+                hi: var_hi,
+            },
+            Box::new(arg),
+            Box::new(ret),
+        )
+    }
+    fn forall(
+        (lo, hi): (usize, usize),
+        (var_lo, var_hi): (usize, usize),
+        arg: Expr,
+        ret: Expr,
+    ) -> Expr {
+        Expr::Forall(
+            Span { lo, hi },
+            Span {
+                lo: var_lo,
+                hi: var_hi,
+            },
+            Box::new(arg),
+            Box::new(ret),
+        )
+    }
+
     fn run_test(text: &str, expected_exprs: &[Expr]) -> Result<()> {
         let tokens = tokenize(text);
         let actual_sexps = sexpify(&tokens, text)?;
@@ -377,21 +399,31 @@ fn test_parse() -> Result<()> {
         Ok(())
     }
 
-    run_test("a", &[var(0, 1)])?;
-    run_test("(f x)", &[app(0, 5, var(1, 2), var(3, 4))])?;
+    run_test("T", &[type_(0, 1)])?;
+    run_test("P", &[prop(0, 1)])?;
+    run_test("abc", &[var(0, 3)])?;
+    run_test("(f x)", &[app((0, 5), var(1, 2), var(3, 4))])?;
     run_test(
         "(lambda x : (forall A : T -> P) -> y)",
         &[lambda(
             (0, 37),
             (8, 9),
-            forall((12, 31), (20, 21), typ(24, 25), prop(29, 30)),
+            forall((12, 31), (20, 21), type_(24, 25), prop(29, 30)),
             var(35, 36),
+        )],
+    )?;
+    run_test(
+        "(let x : t = y in z)",
+        &[app(
+            (0, 20),
+            lambda((0, 20), (5, 6), var(9, 10), var(13, 14)),
+            var(18, 19),
         )],
     )?;
     assert_eq!(
         run_test("(x y z)", &[]),
         Err(String::from(
-            "error at 1:1: expected application or abstraction\n(x y z)"
+            "error at 1:1: expected application, abstraction, or let binding\n(x y z)"
         ))
     );
     Ok(())
@@ -580,6 +612,11 @@ fn test_typecheck() -> Result<()> {
     )?;
     run_test(
         "((lambda x : P -> x) (forall x : P -> x))",
+        "(forall x : P -> x)",
+        "P",
+    )?;
+    run_test(
+        "(let x : P = x in (forall x : P -> x))",
         "(forall x : P -> x)",
         "P",
     )?;

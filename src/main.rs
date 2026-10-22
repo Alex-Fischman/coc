@@ -1,6 +1,7 @@
 //! An experiment with typechecking, theorem proving, and building a full compiler stack.
 
 #![deny(clippy::all, clippy::pedantic)]
+#![allow(clippy::too_many_lines)]
 
 type Result<T> = std::result::Result<T, String>;
 
@@ -272,7 +273,10 @@ enum Expr {
     Forall(Span, Span, Box<Expr>, Box<Expr>),
 }
 
-fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
+#[derive(Clone, Debug, PartialEq)]
+struct Decl(Span, Span, Box<Expr>, Box<Expr>);
+
+fn parse_expr(sexp: &Sexp, text: &str) -> Result<Expr> {
     Ok(match sexp {
         Sexp::Atom(span) => match span.string(text) {
             "T" => Expr::Type(*span),
@@ -280,7 +284,11 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
             _ => Expr::Var(*span),
         },
         Sexp::List(span, list) => match &list[..] {
-            [f, x] => Expr::App(*span, Box::new(parse(f, text)?), Box::new(parse(x, text)?)),
+            [f, x] => Expr::App(
+                *span,
+                Box::new(parse_expr(f, text)?),
+                Box::new(parse_expr(x, text)?),
+            ),
             [
                 Sexp::Atom(op),
                 Sexp::Atom(var),
@@ -295,8 +303,8 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
                 if arrow.string(text) != "->" {
                     return err!(text, span, "expected arrow");
                 }
-                let arg = Box::new(parse(arg, text)?);
-                let ret = Box::new(parse(ret, text)?);
+                let arg = Box::new(parse_expr(arg, text)?);
+                let ret = Box::new(parse_expr(ret, text)?);
                 match op.string(text) {
                     "lambda" => Expr::Lambda(*span, *var, arg, ret),
                     "forall" => Expr::Forall(*span, *var, arg, ret),
@@ -325,9 +333,9 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
                 if in_.string(text) != "in" {
                     return err!(text, span, "expected in");
                 }
-                let arg = Box::new(parse(arg, text)?);
-                let ret = Box::new(parse(ret, text)?);
-                let val = Box::new(parse(val, text)?);
+                let arg = Box::new(parse_expr(arg, text)?);
+                let ret = Box::new(parse_expr(ret, text)?);
+                let val = Box::new(parse_expr(val, text)?);
                 Expr::App(*span, Box::new(Expr::Lambda(*span, *var, arg, ret)), val)
             }
             _ => {
@@ -337,6 +345,35 @@ fn parse(sexp: &Sexp, text: &str) -> Result<Expr> {
                     "expected application, abstraction, or let binding"
                 );
             }
+        },
+    })
+}
+
+fn parse_decl(sexp: &Sexp, text: &str) -> Result<Decl> {
+    Ok(match sexp {
+        Sexp::Atom(span) => return err!(text, span, "expected declaration"),
+        Sexp::List(span, list) => match &list[..] {
+            [
+                Sexp::Atom(var),
+                Sexp::Atom(colon),
+                arg,
+                Sexp::Atom(equals),
+                val,
+            ] => {
+                if colon.string(text) != ":" {
+                    return err!(text, span, "expected colon");
+                }
+                if equals.string(text) != "=" {
+                    return err!(text, span, "expected equals");
+                }
+                Decl(
+                    *span,
+                    *var,
+                    Box::new(parse_expr(arg, text)?),
+                    Box::new(parse_expr(val, text)?),
+                )
+            }
+            _ => return err!(text, span, "expected declaration"),
         },
     })
 }
@@ -387,23 +424,50 @@ fn test_parse() -> Result<()> {
             Box::new(ret),
         )
     }
+    fn decl(
+        (lo, hi): (usize, usize),
+        (var_lo, var_hi): (usize, usize),
+        arg: Expr,
+        val: Expr,
+    ) -> Decl {
+        Decl(
+            Span { lo, hi },
+            Span {
+                lo: var_lo,
+                hi: var_hi,
+            },
+            Box::new(arg),
+            Box::new(val),
+        )
+    }
 
-    fn run_test(text: &str, expected_exprs: &[Expr]) -> Result<()> {
+    fn run_test_expr(text: &str, expected_exprs: &[Expr]) -> Result<()> {
         let tokens = tokenize(text);
         let actual_sexps = sexpify(&tokens, text)?;
         let actual_exprs = actual_sexps
             .into_iter()
-            .map(|sexp| parse(&sexp, text))
+            .map(|sexp| parse_expr(&sexp, text))
             .collect::<Result<Vec<_>>>()?;
         assert_eq!(expected_exprs, actual_exprs);
         Ok(())
     }
 
-    run_test("T", &[type_(0, 1)])?;
-    run_test("P", &[prop(0, 1)])?;
-    run_test("abc", &[var(0, 3)])?;
-    run_test("(f x)", &[app((0, 5), var(1, 2), var(3, 4))])?;
-    run_test(
+    fn run_test_decl(text: &str, expected_decls: &[Decl]) -> Result<()> {
+        let tokens = tokenize(text);
+        let actual_sexps = sexpify(&tokens, text)?;
+        let actual_decls = actual_sexps
+            .into_iter()
+            .map(|sexp| parse_decl(&sexp, text))
+            .collect::<Result<Vec<_>>>()?;
+        assert_eq!(expected_decls, actual_decls);
+        Ok(())
+    }
+
+    run_test_expr("T", &[type_(0, 1)])?;
+    run_test_expr("P", &[prop(0, 1)])?;
+    run_test_expr("abc", &[var(0, 3)])?;
+    run_test_expr("(f x)", &[app((0, 5), var(1, 2), var(3, 4))])?;
+    run_test_expr(
         "(lambda x : (forall A : T -> P) -> y)",
         &[lambda(
             (0, 37),
@@ -412,7 +476,7 @@ fn test_parse() -> Result<()> {
             var(35, 36),
         )],
     )?;
-    run_test(
+    run_test_expr(
         "(let x : t = y in z)",
         &[app(
             (0, 20),
@@ -421,11 +485,25 @@ fn test_parse() -> Result<()> {
         )],
     )?;
     assert_eq!(
-        run_test("(x y z)", &[]),
+        run_test_expr("(x y z)", &[]),
         Err(String::from(
             "error at 1:1: expected application, abstraction, or let binding\n(x y z)"
         ))
     );
+
+    run_test_decl(
+        "(x : T = P) (y : P = (forall z : P -> z))",
+        &[
+            decl((0, 11), (1, 2), type_(5, 6), prop(9, 10)),
+            decl(
+                (12, 41),
+                (13, 14),
+                prop(17, 18),
+                forall((21, 40), (29, 30), prop(33, 34), var(38, 39)),
+            ),
+        ],
+    )?;
+
     Ok(())
 }
 
@@ -595,7 +673,7 @@ fn test_typecheck() -> Result<()> {
     fn run_test(text: &str, expected_eval: &str, expected_type: &str) -> Result<()> {
         let tokens = tokenize(text);
         let sexp = sexpify(&tokens, text)?.remove(0);
-        let expr = parse(&sexp, text)?;
+        let expr = parse_expr(&sexp, text)?;
         let actual_eval = expr.clone().beta_reduce(text).to_string(text);
         assert_eq!(expected_eval, actual_eval);
         let actual_type = expr.typecheck(text)?;
@@ -626,11 +704,11 @@ fn test_typecheck() -> Result<()> {
 fn run(text: &str) -> Result<()> {
     let tokens = tokenize(text);
     let sexps = sexpify(&tokens, text)?;
-    let exprs = sexps
+    let decls = sexps
         .into_iter()
-        .map(|sexp| parse(&sexp, text))
+        .map(|sexp| parse_decl(&sexp, text))
         .collect::<Result<Vec<_>>>()?;
-    println!("{exprs:#?}");
+    println!("{decls:#?}");
     Ok(())
 }
 

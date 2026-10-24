@@ -272,16 +272,35 @@ enum Expr {
     Forall(Span, Span, Box<Expr>, Box<Expr>),
 }
 
-fn parse_binding(text: &str, span: Span, list: &[Sexp]) -> Result<(Span, Expr)> {
-    Ok(match list {
-        [Sexp::Atom(x), Sexp::Atom(colon), t] => {
-            if colon.string(text) != ":" {
-                return err!(text, span, "expected colon");
-            }
-            (*x, parse_expr(text, t)?)
+impl Expr {
+    fn span(&self) -> Span {
+        match self {
+            Expr::Type(span)
+            | Expr::Var(span)
+            | Expr::App(span, ..)
+            | Expr::Lambda(span, ..)
+            | Expr::Forall(span, ..) => *span,
         }
-        _ => return err!(text, span, "expected binding"),
-    })
+    }
+}
+
+fn parse_applications(text: &str, span: Span, sexps: &[Sexp]) -> Result<Expr> {
+    match sexps
+        .iter()
+        .map(|sexp| parse_expr(text, sexp))
+        .reduce(|f, x| match (f, x) {
+            (Err(err), _) | (_, Err(err)) => Err(err),
+            (Ok(f), Ok(x)) => {
+                let span = Span {
+                    lo: f.span().lo,
+                    hi: x.span().hi,
+                };
+                Ok(Expr::App(span, Box::new(f), Box::new(x)))
+            }
+        }) {
+        Some(expr) => expr,
+        None => err!(text, span, "expected expression"),
+    }
 }
 
 fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
@@ -290,29 +309,49 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
             "*" => Expr::Type(*span),
             _ => Expr::Var(*span),
         },
-        Sexp::List(span, list) => match &list[..] {
-            [f, x] => Expr::App(
-                *span,
-                Box::new(parse_expr(text, f)?),
-                Box::new(parse_expr(text, x)?),
-            ),
-            [
-                Sexp::List(binding_span, binding_list),
-                Sexp::Atom(arrow),
-                ret,
-            ] => {
-                let (var, arg) = parse_binding(text, *binding_span, binding_list)?;
-                let ret = Box::new(parse_expr(text, ret)?);
-                match arrow.string(text) {
-                    "->" => Expr::Lambda(*span, var, Box::new(arg), ret),
-                    "=>" => Expr::Forall(*span, var, Box::new(arg), ret),
-                    _ => return err!(text, arrow, "expected -> or =>"),
+        Sexp::List(span, list) => {
+            let first_arrow = list
+                .iter()
+                .rev()
+                .enumerate()
+                .find_map(|(i, sexp)| match sexp {
+                    Sexp::Atom(span) if span.string(text) == "->" => Some((i, true)),
+                    Sexp::Atom(span) if span.string(text) == "=>" => Some((i, false)),
+                    _ => None,
+                });
+            match first_arrow {
+                None => parse_applications(text, *span, list)?,
+                Some((first_arrow_index, first_arrow_is_lambda)) => {
+                    let before = &list[0..first_arrow_index];
+                    let after = &list[first_arrow_index + 1..];
+
+                    let Some((binding, before)) = before.split_last() else {
+                        return err!(text, span, "expected binding before arrow");
+                    };
+
+                    let (var, arg) = match binding {
+                        Sexp::Atom(span) => return err!(text, span, "expected binding"),
+                        Sexp::List(span, list) => match &list[..] {
+                            [Sexp::Atom(var), Sexp::Atom(colon), arg] => {
+                                if colon.string(text) != ":" {
+                                    return err!(text, span, "expected colon");
+                                }
+                                (var, Box::new(parse_expr(text, arg)?))
+                            }
+                            _ => return err!(text, span, "expected binding"),
+                        },
+                    };
+
+                    let ret = Box::new(parse_applications(text, *span, after)?);
+
+                    if first_arrow_is_lambda {
+                        Expr::Lambda(*span, *var, arg, ret)
+                    } else {
+                        Expr::Forall(*span, *var, arg, ret)
+                    }
                 }
             }
-            _ => {
-                return err!(text, span, "expected application or abstraction");
-            }
-        },
+        }
     })
 }
 
@@ -432,7 +471,7 @@ fn test_parse() -> Result<()> {
 
     run_test_expr("*", &[star(0, 1)])?;
     run_test_expr("abc", &[var(0, 3)])?;
-    run_test_expr("(f x)", &[app((0, 5), var(1, 2), var(3, 4))])?;
+    run_test_expr("(f x)", &[app((1, 4), var(1, 2), var(3, 4))])?;
     run_test_expr(
         "((x : ((A : *) => A)) -> y)",
         &[lambda(
@@ -442,12 +481,10 @@ fn test_parse() -> Result<()> {
             var(25, 26),
         )],
     )?;
-    assert_eq!(
-        run_test_expr("(x y z)", &[]),
-        Err(String::from(
-            "error at 1:1: expected application or abstraction\n(x y z)"
-        ))
-    );
+    run_test_expr(
+        "(f x y)",
+        &[app((1, 6), app((1, 4), var(1, 2), var(3, 4)), var(5, 6))],
+    )?;
 
     run_test_decl(
         "(x : * = P) (y : P = ((z : P) => z))",

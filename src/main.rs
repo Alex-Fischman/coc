@@ -266,7 +266,6 @@ fn test_sexpify() -> Result<()> {
 #[derive(Clone, Debug, PartialEq)]
 enum Expr {
     Type(Span),
-    Prop(Span),
     Var(Span),
     App(Span, Box<Expr>, Box<Expr>),
     Lambda(Span, Span, Box<Expr>, Box<Expr>),
@@ -276,8 +275,7 @@ enum Expr {
 fn parse_expr(sexp: &Sexp, text: &str) -> Result<Expr> {
     Ok(match sexp {
         Sexp::Atom(span) => match span.string(text) {
-            "T" => Expr::Type(*span),
-            "P" => Expr::Prop(*span),
+            "*" => Expr::Type(*span),
             _ => Expr::Var(*span),
         },
         Sexp::List(span, list) => match &list[..] {
@@ -383,9 +381,6 @@ fn test_parse() -> Result<()> {
     fn type_(lo: usize, hi: usize) -> Expr {
         Expr::Type(Span { lo, hi })
     }
-    fn prop(lo: usize, hi: usize) -> Expr {
-        Expr::Prop(Span { lo, hi })
-    }
     fn var(lo: usize, hi: usize) -> Expr {
         Expr::Var(Span { lo, hi })
     }
@@ -463,16 +458,15 @@ fn test_parse() -> Result<()> {
         Ok(())
     }
 
-    run_test_expr("T", &[type_(0, 1)])?;
-    run_test_expr("P", &[prop(0, 1)])?;
+    run_test_expr("*", &[type_(0, 1)])?;
     run_test_expr("abc", &[var(0, 3)])?;
     run_test_expr("(f x)", &[app((0, 5), var(1, 2), var(3, 4))])?;
     run_test_expr(
-        "(lambda x : (forall A : T -> P) -> y)",
+        "(lambda x : (forall A : * -> A) -> y)",
         &[lambda(
             (0, 37),
             (8, 9),
-            forall((12, 31), (20, 21), type_(24, 25), prop(29, 30)),
+            forall((12, 31), (20, 21), type_(24, 25), var(29, 30)),
             var(35, 36),
         )],
     )?;
@@ -492,14 +486,14 @@ fn test_parse() -> Result<()> {
     );
 
     run_test_decl(
-        "(x : T = P) (y : P = (forall z : P -> z))",
+        "(x : * = P) (y : P = (forall z : P -> z))",
         &[
-            decl((0, 11), (1, 2), type_(5, 6), prop(9, 10)),
+            decl((0, 11), (1, 2), type_(5, 6), var(9, 10)),
             decl(
                 (12, 41),
                 (13, 14),
-                prop(17, 18),
-                forall((21, 40), (29, 30), prop(33, 34), var(38, 39)),
+                var(17, 18),
+                forall((21, 40), (29, 30), var(33, 34), var(38, 39)),
             ),
         ],
     )?;
@@ -550,7 +544,6 @@ impl Expr {
     fn beta_reduce(&self, state: &mut State) -> Expr {
         match self {
             Expr::Type(span) => Expr::Type(*span),
-            Expr::Prop(span) => Expr::Prop(*span),
             Expr::Var(var) => state.lookup(*var),
             Expr::App(span, f, x) => {
                 let f = f.beta_reduce(state);
@@ -584,7 +577,7 @@ impl Expr {
 
     fn is_beta_eq(lhs: &Expr, lhs_state: &mut State, rhs: &Expr, rhs_state: &mut State) -> bool {
         match (lhs.beta_reduce(lhs_state), rhs.beta_reduce(rhs_state)) {
-            (Expr::Type(_), Expr::Type(_)) | (Expr::Prop(_), Expr::Prop(_)) => true,
+            (Expr::Type(_), Expr::Type(_)) => true,
 
             (Expr::Var(lhs_var), Expr::Var(rhs_var)) => {
                 lhs_var.string(lhs_state.text) == rhs_var.string(rhs_state.text)
@@ -616,8 +609,7 @@ impl Expr {
 
     fn typecheck(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
-            Expr::Type(span) => return err!(state.text, span, "no type for T"),
-            Expr::Prop(span) => Expr::Type(*span),
+            Expr::Type(span) => return err!(state.text, span, "no type for *"),
             Expr::Var(var) => state.lookup(*var),
             Expr::App(span, f, x) => {
                 let f_type = f.typecheck(state)?;
@@ -653,8 +645,7 @@ impl Expr {
 
     fn to_string(&self, text: &str) -> String {
         match self {
-            Expr::Type(_) => String::from("T"),
-            Expr::Prop(_) => String::from("P"),
+            Expr::Type(_) => String::from("*"),
             Expr::Var(var) => String::from(var.string(text)),
             Expr::App(_, f, x) => format!("({} {})", f.to_string(text), x.to_string(text)),
             Expr::Lambda(_, var, arg, ret) => format!(
@@ -680,13 +671,17 @@ fn test_typecheck() -> Result<()> {
         let sexp = sexpify(&tokens, text)?.remove(0);
         let expr = parse_expr(&sexp, text)?;
         let actual_eval = expr.beta_reduce(&mut State::new(text)).to_string(text);
-        assert_eq!(expected_eval, actual_eval);
         let actual_type = expr.typecheck(&mut State::new(text))?;
+        assert_eq!(expected_eval, actual_eval);
         assert_eq!(expected_type, actual_type.to_string(text));
         Ok(())
     }
 
-    run_test("P", "P", "T")?;
+    assert_eq!(
+        run_test("*", "", ""),
+        Err(String::from("error at 1:1: no type for *\n*"))
+    );
+    run_test("P", "P", "P")?;
     run_test("(forall x : P -> x)", "(forall x : P -> x)", "P")?;
     run_test(
         "(lambda x : P -> x)",

@@ -362,13 +362,18 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
             while let Some((is_lambda, mut bindings)) = init_groups.pop() {
                 while let Some(binding) = bindings.pop() {
                     let (var, arg) = match binding {
-                        Sexp::Atom(span) => return err!(text, span, "expected binding"),
+                        Sexp::Atom(span) => {
+                            if is_lambda {
+                                return err!(text, span, "expected binding");
+                            }
+                            (Span { lo: 0, hi: 0 }, Box::new(Expr::Var(*span)))
+                        }
                         Sexp::List(span, list) => match &list[..] {
                             [Sexp::Atom(var), Sexp::Atom(colon), arg] => {
                                 if colon.string(text) != ":" {
                                     return err!(text, span, "expected colon");
                                 }
-                                (var, Box::new(parse_expr(text, arg)?))
+                                (*var, Box::new(parse_expr(text, arg)?))
                             }
                             _ => return err!(text, span, "expected binding"),
                         },
@@ -384,9 +389,9 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
                     };
 
                     ret = if is_lambda {
-                        Expr::Lambda(span, *var, arg, Box::new(ret))
+                        Expr::Lambda(span, var, arg, Box::new(ret))
                     } else {
-                        Expr::Forall(span, *var, arg, Box::new(ret))
+                        Expr::Forall(span, var, arg, Box::new(ret))
                     };
                 }
             }
@@ -692,28 +697,33 @@ impl Expr {
             Expr::Type(span) => return err!(state.text, span, "no type for *"),
             Expr::Var(var) => state.find_type(*var)?,
             Expr::App(span, f, x) => {
-                let f_type = f.typecheck(state)?;
-                let x_type = x.typecheck(state)?;
-                match f_type {
-                    Expr::Forall(span, var, arg, ret) => {
-                        if Self::is_alpha_eq(state, &arg, &x_type, &mut Vec::new()) {
-                            state.push(var, Some(*x.clone()), x_type);
-                            let ret = ret.beta_reduce(state)?;
-                            state.pop();
-                            ret
-                        } else {
-                            let f = f.beta_reduce(state)?.to_string(state.text);
-                            let x = x.beta_reduce(state)?.to_string(state.text);
-                            let arg = arg.beta_reduce(state)?.to_string(state.text);
-                            let x_type = x_type.beta_reduce(state)?.to_string(state.text);
-                            return err!(
-                                state.text,
-                                span,
-                                "wrong type for argument\nfunction: {f:?}\nargument: {x:?}\nexpected argument type: {arg:?}\nfound argument type: {x_type:?}"
-                            );
-                        }
+                let f_type = f.typecheck(state)?.beta_reduce(state)?;
+                let x_type = x.typecheck(state)?.beta_reduce(state)?;
+                if let Expr::Forall(_, var, arg, ret) = f_type {
+                    if Self::is_alpha_eq(state, &arg, &x_type, &mut Vec::new()) {
+                        state.push(var, Some(*x.clone()), x_type);
+                        let ret = ret.beta_reduce(state)?;
+                        state.pop();
+                        ret
+                    } else {
+                        let f = f.to_string(state.text);
+                        let x = x.to_string(state.text);
+                        let arg = arg.to_string(state.text);
+                        let x_type = x_type.to_string(state.text);
+                        return err!(
+                            state.text,
+                            span,
+                            "wrong type for argument\nfunction: {f}\nargument: {x}\nexpected argument type: {arg}\nfound argument type: {x_type}"
+                        );
                     }
-                    _ => return err!(state.text, span, "expected forall type"),
+                } else {
+                    let f = f.to_string(state.text);
+                    let f_type = f_type.to_string(state.text);
+                    return err!(
+                        state.text,
+                        span,
+                        "expected value to have a forall type\nvalue: {f}\ntype: {f_type}"
+                    );
                 }
             }
             Expr::Lambda(span, var, arg, ret) => {
@@ -774,17 +784,17 @@ fn run(text: &str) -> Result<()> {
 
     let mut state = State::new(text);
     for Decl(span, var, arg, val) in decls {
-        let given = arg.beta_reduce(&mut state)?;
-        let inferred = val.typecheck(&mut state)?;
-        if Expr::is_alpha_eq(&state, &given, &inferred, &mut Vec::new()) {
-            state.push(var, Some(*val), given);
+        let expected = arg.beta_reduce(&mut state)?;
+        let inferred = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
+        if Expr::is_alpha_eq(&state, &expected, &inferred, &mut Vec::new()) {
+            state.push(var, Some(*val), expected);
         } else {
-            let given = given.to_string(state.text);
+            let expected = expected.to_string(state.text);
             let inferred = inferred.to_string(state.text);
             return err!(
                 state.text,
                 span,
-                "was given {given} but inferred {inferred}"
+                "declaration did not typecheck\nexpected: {expected}\ninferred: {inferred}"
             );
         }
     }

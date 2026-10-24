@@ -285,7 +285,6 @@ fn parse_expr(sexp: &Sexp, text: &str) -> Result<Expr> {
                 Box::new(parse_expr(x, text)?),
             ),
             [
-                Sexp::Atom(op),
                 Sexp::Atom(var),
                 Sexp::Atom(colon),
                 arg,
@@ -295,15 +294,12 @@ fn parse_expr(sexp: &Sexp, text: &str) -> Result<Expr> {
                 if colon.string(text) != ":" {
                     return err!(text, span, "expected colon");
                 }
-                if arrow.string(text) != "->" {
-                    return err!(text, span, "expected arrow");
-                }
                 let arg = Box::new(parse_expr(arg, text)?);
                 let ret = Box::new(parse_expr(ret, text)?);
-                match op.string(text) {
-                    "lambda" => Expr::Lambda(*span, *var, arg, ret),
-                    "forall" => Expr::Forall(*span, *var, arg, ret),
-                    _ => return err!(text, op, "expected lambda or forall"),
+                match arrow.string(text) {
+                    "->" => Expr::Lambda(*span, *var, arg, ret),
+                    "=>" => Expr::Forall(*span, *var, arg, ret),
+                    _ => return err!(text, arrow, "expected -> or =>"),
                 }
             }
             [
@@ -378,7 +374,7 @@ fn parse_decl(sexp: &Sexp, text: &str) -> Result<Decl> {
 
 #[test]
 fn test_parse() -> Result<()> {
-    fn type_(lo: usize, hi: usize) -> Expr {
+    fn star(lo: usize, hi: usize) -> Expr {
         Expr::Type(Span { lo, hi })
     }
     fn var(lo: usize, hi: usize) -> Expr {
@@ -458,16 +454,16 @@ fn test_parse() -> Result<()> {
         Ok(())
     }
 
-    run_test_expr("*", &[type_(0, 1)])?;
+    run_test_expr("*", &[star(0, 1)])?;
     run_test_expr("abc", &[var(0, 3)])?;
     run_test_expr("(f x)", &[app((0, 5), var(1, 2), var(3, 4))])?;
     run_test_expr(
-        "(lambda x : (forall A : * -> A) -> y)",
+        "(x : (A : * => A) -> y)",
         &[lambda(
-            (0, 37),
-            (8, 9),
-            forall((12, 31), (20, 21), type_(24, 25), var(29, 30)),
-            var(35, 36),
+            (0, 23),
+            (1, 2),
+            forall((5, 17), (6, 7), star(10, 11), var(15, 16)),
+            var(21, 22),
         )],
     )?;
     run_test_expr(
@@ -486,14 +482,14 @@ fn test_parse() -> Result<()> {
     );
 
     run_test_decl(
-        "(x : * = P) (y : P = (forall z : P -> z))",
+        "(x : * = P) (y : P = (z : P => z))",
         &[
-            decl((0, 11), (1, 2), type_(5, 6), var(9, 10)),
+            decl((0, 11), (1, 2), star(5, 6), var(9, 10)),
             decl(
-                (12, 41),
+                (12, 34),
                 (13, 14),
                 var(17, 18),
-                forall((21, 40), (29, 30), var(33, 34), var(38, 39)),
+                forall((21, 33), (22, 23), var(26, 27), var(31, 32)),
             ),
         ],
     )?;
@@ -657,13 +653,13 @@ impl Expr {
             Expr::Var(var) => String::from(var.string(text)),
             Expr::App(_, f, x) => format!("({} {})", f.to_string(text), x.to_string(text)),
             Expr::Lambda(_, var, arg, ret) => format!(
-                "(lambda {} : {} -> {})",
+                "({} : {} -> {})",
                 var.string(text),
                 arg.to_string(text),
                 ret.to_string(text)
             ),
             Expr::Forall(_, var, arg, ret) => format!(
-                "(forall {} : {} -> {})",
+                "({} : {} => {})",
                 var.string(text),
                 arg.to_string(text),
                 ret.to_string(text)
@@ -689,22 +685,10 @@ fn test_typecheck() -> Result<()> {
         run_test("*", "", ""),
         Err(String::from("error at 1:1: no type for *\n*"))
     );
-    run_test("(forall x : * -> x)", "(forall x : * -> x)", "*")?;
-    run_test(
-        "(lambda x : * -> x)",
-        "(lambda x : * -> x)",
-        "(forall x : * -> *)",
-    )?;
-    run_test(
-        "((lambda x : * -> x) (forall x : * -> x))",
-        "(forall x : * -> x)",
-        "*",
-    )?;
-    run_test(
-        "(let x : * = (forall x : * -> x) in x)",
-        "(forall x : * -> x)",
-        "*",
-    )?;
+    run_test("(x : * => x)", "(x : * => x)", "*")?;
+    run_test("(x : * -> x)", "(x : * -> x)", "(x : * => *)")?;
+    run_test("((x : * -> x) (x : * => x))", "(x : * => x)", "*")?;
+    run_test("(let x : * = (x : * => x) in x)", "(x : * => x)", "*")?;
     Ok(())
 }
 

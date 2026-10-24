@@ -309,35 +309,8 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
                     _ => return err!(text, arrow, "expected -> or =>"),
                 }
             }
-            [
-                Sexp::Atom(let_),
-                Sexp::List(binding_span, binding_list),
-                Sexp::Atom(equals),
-                val,
-                Sexp::Atom(in_),
-                ret,
-            ] => {
-                if let_.string(text) != "let" {
-                    return err!(text, span, "expected let");
-                }
-                let (var, arg) = parse_binding(text, *binding_span, binding_list)?;
-                if equals.string(text) != "=" {
-                    return err!(text, span, "expected equals");
-                }
-                if in_.string(text) != "in" {
-                    return err!(text, span, "expected in");
-                }
-                let ret = Box::new(parse_expr(text, ret)?);
-                let val = Box::new(parse_expr(text, val)?);
-                let lambda = Expr::Lambda(*span, var, Box::new(arg), ret);
-                Expr::App(*span, Box::new(lambda), val)
-            }
             _ => {
-                return err!(
-                    text,
-                    span,
-                    "expected application, abstraction, or let binding"
-                );
+                return err!(text, span, "expected application or abstraction");
             }
         },
     })
@@ -469,18 +442,10 @@ fn test_parse() -> Result<()> {
             var(25, 26),
         )],
     )?;
-    run_test_expr(
-        "(let (x : t) = y in z)",
-        &[app(
-            (0, 22),
-            lambda((0, 22), (6, 7), var(10, 11), var(20, 21)),
-            var(15, 16),
-        )],
-    )?;
     assert_eq!(
         run_test_expr("(x y z)", &[]),
         Err(String::from(
-            "error at 1:1: expected application, abstraction, or let binding\n(x y z)"
+            "error at 1:1: expected application or abstraction\n(x y z)"
         ))
     );
 
@@ -691,7 +656,6 @@ fn test_typecheck() -> Result<()> {
     run_test("((x : *) => x)", "((x : *) => x)", "*")?;
     run_test("((x : *) -> x)", "((x : *) -> x)", "((x : *) => *)")?;
     run_test("(((x : *) -> x) ((x : *) => x))", "((x : *) => x)", "*")?;
-    run_test("(let (x : *) = ((x : *) => x) in x)", "((x : *) => x)", "*")?;
     Ok(())
 }
 

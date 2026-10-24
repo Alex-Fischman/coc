@@ -404,33 +404,40 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
 #[derive(Clone, Debug, PartialEq)]
 struct Decl(Span, Span, Box<Expr>, Box<Expr>);
 
-fn parse_decl(sexp: &Sexp, text: &str) -> Result<Decl> {
-    Ok(match sexp {
-        Sexp::Atom(span) => return err!(text, span, "expected declaration"),
-        Sexp::List(span, list) => match &list[..] {
-            [
-                Sexp::Atom(var),
-                Sexp::Atom(colon),
-                arg,
-                Sexp::Atom(equals),
-                val,
-            ] => {
-                if colon.string(text) != ":" {
-                    return err!(text, span, "expected colon");
-                }
-                if equals.string(text) != "=" {
-                    return err!(text, span, "expected equals");
-                }
-                Decl(
-                    *span,
-                    *var,
-                    Box::new(parse_expr(text, arg)?),
-                    Box::new(parse_expr(text, val)?),
-                )
-            }
-            _ => return err!(text, span, "expected declaration"),
-        },
-    })
+fn parse_decl(text: &str, [var, colon, arg, equals, val]: &[Sexp; 5]) -> Result<Decl> {
+    let span = Span {
+        lo: var.span().lo,
+        hi: val.span().hi,
+    };
+    let Sexp::Atom(var) = var else {
+        return err!(text, var.span(), "expected variable name");
+    };
+    if colon.span().string(text) != ":" {
+        return err!(text, colon.span(), "expected colon");
+    }
+    let arg = Box::new(parse_expr(text, arg)?);
+    if equals.span().string(text) != "=" {
+        return err!(text, equals.span(), "expected equals");
+    }
+    let val = Box::new(parse_expr(text, val)?);
+    Ok(Decl(span, *var, arg, val))
+}
+
+fn parse_decls(text: &str) -> Result<Vec<Decl>> {
+    let tokens = tokenize(text);
+    let sexps = sexpify(&tokens, text)?;
+    let (sexps, extra) = sexps.as_chunks();
+
+    let decls = sexps
+        .iter()
+        .map(|sexps| parse_decl(text, sexps))
+        .collect::<Result<Vec<_>>>()?;
+
+    if let Some(sexp) = extra.first() {
+        return err!(text, sexp.span(), "unexpected");
+    }
+
+    Ok(decls)
 }
 
 #[test]
@@ -505,12 +512,7 @@ fn test_parse() -> Result<()> {
     }
 
     fn run_test_decl(text: &str, expected_decls: &[Decl]) -> Result<()> {
-        let tokens = tokenize(text);
-        let actual_sexps = sexpify(&tokens, text)?;
-        let actual_decls = actual_sexps
-            .into_iter()
-            .map(|sexp| parse_decl(&sexp, text))
-            .collect::<Result<Vec<_>>>()?;
+        let actual_decls = parse_decls(text)?;
         assert_eq!(expected_decls, actual_decls);
         Ok(())
     }
@@ -542,11 +544,11 @@ fn test_parse() -> Result<()> {
     )?;
 
     run_test_decl(
-        "(x : * = P) (y : P = ((z : P) => z))",
+        " x : * = P   y : P = ((z : P) => z) ",
         &[
-            decl((0, 11), (1, 2), star(5, 6), var(9, 10)),
+            decl((1, 10), (1, 2), star(5, 6), var(9, 10)),
             decl(
-                (12, 36),
+                (13, 35),
                 (13, 14),
                 var(17, 18),
                 forall((21, 35), (23, 24), var(27, 28), var(33, 34)),
@@ -775,15 +777,8 @@ fn test_typecheck() -> Result<()> {
 fn run(text: &str) -> Result<()> {
     println!();
 
-    let tokens = tokenize(text);
-    let sexps = sexpify(&tokens, text)?;
-    let decls = sexps
-        .into_iter()
-        .map(|sexp| parse_decl(&sexp, text))
-        .collect::<Result<Vec<_>>>()?;
-
     let mut state = State::new(text);
-    for Decl(span, var, arg, val) in decls {
+    for Decl(span, var, arg, val) in parse_decls(text)? {
         let expected = arg.beta_reduce(&mut state)?;
         let inferred = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
         if Expr::is_alpha_eq(&state, &expected, &inferred, &mut Vec::new()) {
@@ -806,8 +801,8 @@ fn run(text: &str) -> Result<()> {
 #[test]
 fn test_run() -> Result<()> {
     run("
-        (Unit : * = ((T : *) (_ : T) => T))
-        (unit : Unit = ((T : *) (x : T) -> x))
+        Unit : * = ((T : *) (_ : T) => T)
+        unit : Unit = ((T : *) (x : T) -> x)
     ")?;
 
     Ok(())

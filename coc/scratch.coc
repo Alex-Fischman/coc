@@ -1,9 +1,10 @@
-(Unit : *    = ((T : *) (_ : T) => T))
-(unit : Unit = ((T : *) (x : T) -> x))
+Unit : *    = ((T : *) (_ : T) => T)
+unit : Unit = ((T : *) (x : T) -> x)
 
-(Bool  : *    = ((A : *) (_ : A) (_ : A) => A))
-(false : Bool = ((A : *) (0 : A) (_ : A) -> 0))
-(true  : Bool = ((A : *) (_ : A) (1 : A) -> 1))
-(and
+Bool  : *    = ((A : *) (_ : A) (_ : A) => A)
+false : Bool = ((A : *) (0 : A) (_ : A) -> 0)
+true  : Bool = ((A : *) (_ : A) (1 : A) -> 1)
+
+and
 : (Bool Bool => Bool)
-= ((a : Bool) (b : Bool) -> a Bool false (b Bool false true)))
+= ((a : Bool) (b : Bool) -> a Bool false (b Bool false true))

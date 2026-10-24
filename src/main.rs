@@ -16,10 +16,16 @@ macro_rules! err {
     };
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 struct Span {
     lo: usize,
     hi: usize,
+}
+
+impl std::fmt::Debug for Span {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{}-{}", self.lo, self.hi)
+    }
 }
 
 impl Span {
@@ -163,6 +169,14 @@ enum Sexp {
     List(Span, Vec<Sexp>),
 }
 
+impl Sexp {
+    fn span(&self) -> Span {
+        match self {
+            Sexp::Atom(span) | Sexp::List(span, ..) => *span,
+        }
+    }
+}
+
 #[cfg(test)]
 fn atom(lo: usize, hi: usize) -> Sexp {
     Sexp::Atom(Span { lo, hi })
@@ -282,24 +296,25 @@ impl Expr {
             | Expr::Forall(span, ..) => *span,
         }
     }
-}
 
-fn parse_applications(text: &str, span: Span, sexps: &[Sexp]) -> Result<Expr> {
-    match sexps
-        .iter()
-        .map(|sexp| parse_expr(text, sexp))
-        .reduce(|f, x| match (f, x) {
-            (Err(err), _) | (_, Err(err)) => Err(err),
-            (Ok(f), Ok(x)) => {
-                let span = Span {
-                    lo: f.span().lo,
-                    hi: x.span().hi,
-                };
-                Ok(Expr::App(span, Box::new(f), Box::new(x)))
-            }
-        }) {
-        Some(expr) => expr,
-        None => err!(text, span, "expected expression"),
+    fn to_string(&self, text: &str) -> String {
+        match self {
+            Expr::Type(_) => String::from("*"),
+            Expr::Var(var) => String::from(var.string(text)),
+            Expr::App(_, f, x) => format!("({} {})", f.to_string(text), x.to_string(text)),
+            Expr::Lambda(_, var, arg, ret) => format!(
+                "(({} : {}) -> {})",
+                var.string(text),
+                arg.to_string(text),
+                ret.to_string(text)
+            ),
+            Expr::Forall(_, var, arg, ret) => format!(
+                "(({} : {}) => {})",
+                var.string(text),
+                arg.to_string(text),
+                ret.to_string(text)
+            ),
+        }
     }
 }
 
@@ -310,25 +325,42 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
             _ => Expr::Var(*span),
         },
         Sexp::List(span, list) => {
-            let first_arrow = list
-                .iter()
-                .rev()
-                .enumerate()
-                .find_map(|(i, sexp)| match sexp {
-                    Sexp::Atom(span) if span.string(text) == "->" => Some((i, true)),
-                    Sexp::Atom(span) if span.string(text) == "=>" => Some((i, false)),
-                    _ => None,
-                });
-            match first_arrow {
-                None => parse_applications(text, *span, list)?,
-                Some((first_arrow_index, first_arrow_is_lambda)) => {
-                    let before = &list[0..first_arrow_index];
-                    let after = &list[first_arrow_index + 1..];
+            let mut init_groups = Vec::new();
+            let mut last_group = Vec::new();
+            for sexp in list {
+                match sexp {
+                    Sexp::Atom(span) if span.string(text) == "->" => {
+                        init_groups.push((true, last_group));
+                        last_group = Vec::new();
+                    }
+                    Sexp::Atom(span) if span.string(text) == "=>" => {
+                        init_groups.push((false, last_group));
+                        last_group = Vec::new();
+                    }
+                    _ => last_group.push(sexp),
+                }
+            }
 
-                    let Some((binding, before)) = before.split_last() else {
-                        return err!(text, span, "expected binding before arrow");
-                    };
+            let Some(mut ret) = last_group
+                .into_iter()
+                .map(|sexp| parse_expr(text, sexp))
+                .reduce(|f, x| match (f, x) {
+                    (Err(err), _) | (_, Err(err)) => Err(err),
+                    (Ok(f), Ok(x)) => {
+                        let span = Span {
+                            lo: f.span().lo,
+                            hi: x.span().hi,
+                        };
+                        Ok(Expr::App(span, Box::new(f), Box::new(x)))
+                    }
+                })
+                .transpose()?
+            else {
+                return err!(text, span, "expected expression");
+            };
 
+            while let Some((is_lambda, mut bindings)) = init_groups.pop() {
+                while let Some(binding) = bindings.pop() {
                     let (var, arg) = match binding {
                         Sexp::Atom(span) => return err!(text, span, "expected binding"),
                         Sexp::List(span, list) => match &list[..] {
@@ -342,15 +374,24 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
                         },
                     };
 
-                    let ret = Box::new(parse_applications(text, *span, after)?);
-
-                    if first_arrow_is_lambda {
-                        Expr::Lambda(*span, *var, arg, ret)
+                    let span = if init_groups.is_empty() && bindings.is_empty() {
+                        *span
                     } else {
-                        Expr::Forall(*span, *var, arg, ret)
-                    }
+                        Span {
+                            lo: binding.span().lo,
+                            hi: ret.span().hi,
+                        }
+                    };
+
+                    ret = if is_lambda {
+                        Expr::Lambda(span, *var, arg, Box::new(ret))
+                    } else {
+                        Expr::Forall(span, *var, arg, Box::new(ret))
+                    };
                 }
             }
+
+            ret
         }
     })
 }
@@ -485,6 +526,15 @@ fn test_parse() -> Result<()> {
         "(f x y)",
         &[app((1, 6), app((1, 4), var(1, 2), var(3, 4)), var(5, 6))],
     )?;
+    run_test_expr(
+        "((T : *) => (x : T) -> x)",
+        &[forall(
+            (0, 25),
+            (2, 3),
+            star(6, 7),
+            lambda((12, 24), (13, 14), var(17, 18), var(23, 24)),
+        )],
+    )?;
 
     run_test_decl(
         "(x : * = P) (y : P = ((z : P) => z))",
@@ -505,7 +555,13 @@ fn test_parse() -> Result<()> {
 #[derive(Clone)]
 struct State<'a> {
     text: &'a str,
-    context: Vec<(&'a str, Option<Expr>)>,
+    context: Vec<(&'a str, Option<Expr>, Expr)>,
+}
+
+impl std::fmt::Debug for State<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self.context)
+    }
 }
 
 impl State<'_> {
@@ -514,22 +570,17 @@ impl State<'_> {
         State { text, context }
     }
 
-    fn bind(&mut self, var: Span) {
-        self.context.push((var.string(self.text), None));
-    }
-
-    fn subst(&mut self, from: Span, to: &Expr) {
-        self.context
-            .push((from.string(self.text), Some(to.clone())));
+    fn push(&mut self, var: Span, val: Option<Expr>, typ: Expr) {
+        self.context.push((var.string(self.text), val, typ));
     }
 
     fn pop(&mut self) {
         self.context.pop();
     }
 
-    fn lookup(&self, var: Span) -> Result<Expr> {
+    fn find_value(&self, var: Span) -> Result<Expr> {
         let var_ = var.string(self.text);
-        for (key, val) in &self.context {
+        for (key, val, _typ) in &self.context {
             if var_ == *key {
                 return Ok(match val {
                     None => Expr::Var(var),
@@ -537,7 +588,17 @@ impl State<'_> {
                 });
             }
         }
-        err!(self.text, var, "unbound variable")
+        err!(self.text, var, "could not find value for variable")
+    }
+
+    fn find_type(&self, var: Span) -> Result<Expr> {
+        let var_ = var.string(self.text);
+        for (key, _val, typ) in &self.context {
+            if var_ == *key {
+                return Ok(typ.clone());
+            }
+        }
+        err!(self.text, var, "could not find type for variable")
     }
 }
 
@@ -545,13 +606,13 @@ impl Expr {
     fn beta_reduce(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
             Expr::Type(span) => Expr::Type(*span),
-            Expr::Var(var) => state.lookup(*var)?,
+            Expr::Var(var) => state.find_value(*var)?,
             Expr::App(span, f, x) => {
                 let f = f.beta_reduce(state)?;
                 let x = x.beta_reduce(state)?;
                 match f {
-                    Expr::Lambda(_, var, _, ret) => {
-                        state.subst(var, &x);
+                    Expr::Lambda(_, var, arg, ret) => {
+                        state.push(var, Some(x), *arg);
                         let ret = ret.beta_reduce(state)?;
                         state.pop();
                         ret
@@ -561,14 +622,14 @@ impl Expr {
             }
             Expr::Lambda(span, var, arg, ret) => {
                 let arg = arg.beta_reduce(state)?;
-                state.bind(*var);
+                state.push(*var, None, arg.clone());
                 let ret = ret.beta_reduce(state)?;
                 state.pop();
                 Expr::Lambda(*span, *var, Box::new(arg), Box::new(ret))
             }
             Expr::Forall(span, var, arg, ret) => {
                 let arg = arg.beta_reduce(state)?;
-                state.bind(*var);
+                state.push(*var, None, arg.clone());
                 let ret = ret.beta_reduce(state)?;
                 state.pop();
                 Expr::Forall(*span, *var, Box::new(arg), Box::new(ret))
@@ -576,23 +637,35 @@ impl Expr {
         })
     }
 
-    fn is_beta_eq(
+    fn is_alpha_eq<'a>(
+        state: &State<'a>,
         lhs: &Expr,
-        lhs_state: &mut State,
         rhs: &Expr,
-        rhs_state: &mut State,
-    ) -> Result<bool> {
-        let matchee = (lhs.beta_reduce(lhs_state)?, rhs.beta_reduce(rhs_state)?);
-        Ok(match matchee {
+        equal_vars: &mut Vec<(&'a str, &'a str)>,
+    ) -> bool {
+        match (lhs, rhs) {
             (Expr::Type(_), Expr::Type(_)) => true,
 
             (Expr::Var(lhs_var), Expr::Var(rhs_var)) => {
-                lhs_var.string(lhs_state.text) == rhs_var.string(rhs_state.text)
+                let lhs_string = lhs_var.string(state.text);
+                let rhs_string = rhs_var.string(state.text);
+                equal_vars
+                    .iter()
+                    .find(|(lhs, rhs)| {
+                        let lhs_matches = *lhs == lhs_string;
+                        let rhs_matches = *rhs == rhs_string;
+                        match (lhs_matches, rhs_matches) {
+                            (true, true) => true,
+                            (false, false) => false,
+                            (true, false) | (false, true) => panic!("is_alpha_eq"),
+                        }
+                    })
+                    .is_some()
             }
 
             (Expr::App(_, lhs_f, lhs_x), Expr::App(_, rhs_f, rhs_x)) => {
-                Self::is_beta_eq(&lhs_f, lhs_state, &rhs_f, rhs_state)?
-                    && Self::is_beta_eq(&lhs_x, lhs_state, &rhs_x, rhs_state)?
+                Self::is_alpha_eq(state, lhs_f, rhs_f, equal_vars)
+                    && Self::is_alpha_eq(state, lhs_x, rhs_x, equal_vars)
             }
 
             (
@@ -603,73 +676,59 @@ impl Expr {
                 Expr::Forall(_, lhs_var, lhs_arg, lhs_ret),
                 Expr::Forall(_, rhs_var, rhs_arg, rhs_ret),
             ) => {
-                let args_eq = Self::is_beta_eq(&lhs_arg, lhs_state, &rhs_arg, rhs_state)?;
-                lhs_state.bind(lhs_var);
-                rhs_state.subst(rhs_var, &Expr::Var(lhs_var));
-                let rets_eq = Self::is_beta_eq(&lhs_ret, lhs_state, &rhs_ret, rhs_state)?;
-                lhs_state.pop();
-                rhs_state.pop();
+                let args_eq = Self::is_alpha_eq(state, lhs_arg, rhs_arg, equal_vars);
+                equal_vars.push((lhs_var.string(state.text), rhs_var.string(state.text)));
+                let rets_eq = Self::is_alpha_eq(state, lhs_ret, rhs_ret, equal_vars);
+                equal_vars.pop();
                 args_eq && rets_eq
             }
 
             _ => false,
-        })
+        }
     }
 
     fn typecheck(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
             Expr::Type(span) => return err!(state.text, span, "no type for *"),
-            Expr::Var(var) => state.lookup(*var)?,
+            Expr::Var(var) => state.find_type(*var)?,
             Expr::App(span, f, x) => {
                 let f_type = f.typecheck(state)?;
                 let x_type = x.typecheck(state)?;
                 match f_type {
-                    Expr::Forall(_, var, arg, ret) => {
-                        if Self::is_beta_eq(&arg, &mut state.clone(), &x_type, state)? {
-                            state.subst(var, x);
+                    Expr::Forall(span, var, arg, ret) => {
+                        if Self::is_alpha_eq(state, &arg, &x_type, &mut Vec::new()) {
+                            state.push(var, Some(*x.clone()), x_type);
                             let ret = ret.beta_reduce(state)?;
                             state.pop();
                             ret
                         } else {
-                            return err!(state.text, span, "wrong type for lambda argument");
+                            let f = f.beta_reduce(state)?.to_string(state.text);
+                            let x = x.beta_reduce(state)?.to_string(state.text);
+                            let arg = arg.beta_reduce(state)?.to_string(state.text);
+                            let x_type = x_type.beta_reduce(state)?.to_string(state.text);
+                            return err!(
+                                state.text,
+                                span,
+                                "wrong type for argument\nfunction: {f:?}\nargument: {x:?}\nexpected argument type: {arg:?}\nfound argument type: {x_type:?}"
+                            );
                         }
                     }
                     _ => return err!(state.text, span, "expected forall type"),
                 }
             }
             Expr::Lambda(span, var, arg, ret) => {
-                state.subst(*var, arg);
+                state.push(*var, None, *arg.clone());
                 let ret = ret.typecheck(state)?;
                 state.pop();
                 Expr::Forall(*span, *var, arg.clone(), Box::new(ret))
             }
             Expr::Forall(_, var, arg, ret) => {
-                state.subst(*var, arg);
+                state.push(*var, None, *arg.clone());
                 let ret = ret.typecheck(state)?;
                 state.pop();
                 ret
             }
         })
-    }
-
-    fn to_string(&self, text: &str) -> String {
-        match self {
-            Expr::Type(_) => String::from("*"),
-            Expr::Var(var) => String::from(var.string(text)),
-            Expr::App(_, f, x) => format!("({} {})", f.to_string(text), x.to_string(text)),
-            Expr::Lambda(_, var, arg, ret) => format!(
-                "(({} : {}) -> {})",
-                var.string(text),
-                arg.to_string(text),
-                ret.to_string(text)
-            ),
-            Expr::Forall(_, var, arg, ret) => format!(
-                "(({} : {}) => {})",
-                var.string(text),
-                arg.to_string(text),
-                ret.to_string(text)
-            ),
-        }
     }
 }
 
@@ -693,6 +752,13 @@ fn test_typecheck() -> Result<()> {
     run_test("((x : *) => x)", "((x : *) => x)", "*")?;
     run_test("((x : *) -> x)", "((x : *) -> x)", "((x : *) => *)")?;
     run_test("(((x : *) -> x) ((x : *) => x))", "((x : *) => x)", "*")?;
+
+    run_test(
+        "(((T : *) (t : T) -> t) ((S : *) => S))",
+        "((t : ((S : *) => S)) -> t)",
+        "((t : ((S : *) => S)) => ((S : *) => S))",
+    )?;
+
     Ok(())
 }
 
@@ -710,8 +776,8 @@ fn run(text: &str) -> Result<()> {
     for Decl(span, var, arg, val) in decls {
         let given = arg.beta_reduce(&mut state)?;
         let inferred = val.typecheck(&mut state)?;
-        if Expr::is_beta_eq(&given, &mut state.clone(), &inferred, &mut state)? {
-            state.subst(var, &val);
+        if Expr::is_alpha_eq(&state, &given, &inferred, &mut Vec::new()) {
+            state.push(var, Some(*val), given);
         } else {
             let given = given.to_string(state.text);
             let inferred = inferred.to_string(state.text);
@@ -724,6 +790,16 @@ fn run(text: &str) -> Result<()> {
     }
 
     println!("SUCCESS");
+    Ok(())
+}
+
+#[test]
+fn test_run() -> Result<()> {
+    run("
+        (Unit : * = ((T : *) (_ : T) => T))
+        (unit : Unit = ((T : *) (x : T) -> x))
+    ")?;
+
     Ok(())
 }
 

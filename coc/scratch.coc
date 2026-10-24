@@ -1,0 +1,5 @@
+(Unit : * = (forall T : * -> (forall _ : T -> T)))
+(unit : Unit = (lambda T : * -> (lambda x : T -> x)))
+
+(Id : * = (forall T : * -> T))
+(id : Id = (lambda T : * -> T))

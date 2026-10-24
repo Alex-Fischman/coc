@@ -4,4 +4,4 @@ git status
 cargo fmt
 cargo clippy --tests
 cargo test --no-fail-fast
-cargo run -- work/scratch.coc
+cargo run -- coc/scratch.coc

@@ -285,7 +285,7 @@ fn test_sexpify() -> Result<()> {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Expr {
-    Type(Span),
+    Star(Span),
     Var(Span),
     App(Span, Box<Expr>, Box<Expr>),
     Lambda(Span, Span, Box<Expr>, Box<Expr>),
@@ -295,7 +295,7 @@ enum Expr {
 impl Expr {
     fn span(&self) -> Span {
         match self {
-            Expr::Type(span)
+            Expr::Star(span)
             | Expr::Var(span)
             | Expr::App(span, ..)
             | Expr::Lambda(span, ..)
@@ -305,7 +305,7 @@ impl Expr {
 
     fn to_string(&self, text: &str) -> String {
         match self {
-            Expr::Type(_) => String::from("*"),
+            Expr::Star(_) => String::from("*"),
             Expr::Var(var) => String::from(var.string(text)),
             Expr::App(_, f, x) => format!("({} {})", f.to_string(text), x.to_string(text)),
             Expr::Lambda(_, var, arg, ret) => format!(
@@ -327,7 +327,7 @@ impl Expr {
 fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
     Ok(match sexp {
         Sexp::Atom(span) => match span.string(text) {
-            "*" => Expr::Type(*span),
+            "*" => Expr::Star(*span),
             _ => Expr::Var(*span),
         },
         Sexp::List(span, list) => {
@@ -469,7 +469,7 @@ fn parse_actions(text: &str) -> Result<Vec<Action>> {
 #[test]
 fn test_parse() -> Result<()> {
     fn star(lo: usize, hi: usize) -> Expr {
-        Expr::Type(Span { lo, hi })
+        Expr::Star(Span { lo, hi })
     }
     fn var(lo: usize, hi: usize) -> Expr {
         Expr::Var(Span { lo, hi })
@@ -651,7 +651,7 @@ impl State<'_> {
 impl Expr {
     fn beta_reduce(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
-            Expr::Type(span) => Expr::Type(*span),
+            Expr::Star(span) => Expr::Star(*span),
             Expr::Var(var) => state.find_value(*var)?,
             Expr::App(span, f, x) => {
                 let f = f.beta_reduce(state)?;
@@ -690,7 +690,7 @@ impl Expr {
         equal_vars: &mut Vec<(&'a str, &'a str)>,
     ) -> bool {
         match (lhs, rhs) {
-            (Expr::Type(_), Expr::Type(_)) => true,
+            (Expr::Star(_), Expr::Star(_)) => true,
 
             (Expr::Var(lhs_var), Expr::Var(rhs_var)) => {
                 let lhs_string = lhs_var.string(state.text);
@@ -735,7 +735,7 @@ impl Expr {
 
     fn typecheck(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
-            Expr::Type(span) => return err!(state.text, span, "no type for *"),
+            Expr::Star(span) => return err!(state.text, span, "no type for *"),
             Expr::Var(var) => state.find_type(*var)?,
             Expr::App(span, f, x) => {
                 let f_type = f.typecheck(state)?.beta_reduce(state)?;

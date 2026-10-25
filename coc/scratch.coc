@@ -1,4 +1,6 @@
-define Unit: ((A:*) (a:A) => A)
+define Null: ((A:*) => A)
+
+define Unit: ((A:*) (_:A) => A)
 define unit: ((A:*) (a:A) -> a)
 
 define Bool:  ((A:*) (_:A) (_:A) => A)

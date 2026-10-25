@@ -368,13 +368,7 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
             while let Some((is_lambda, mut bindings)) = init_groups.pop() {
                 while let Some(binding) = bindings.pop() {
                     let (var, arg) = match binding {
-                        Sexp::Atom(span) => {
-                            if is_lambda {
-                                (*span, Box::new(Expr::Type(*span)))
-                            } else {
-                                (Span { lo: 0, hi: 0 }, Box::new(Expr::Var(*span)))
-                            }
-                        }
+                        Sexp::Atom(span) => return err!(text, span, "expected binding"),
                         Sexp::List(span, list) => match &list[..] {
                             [Sexp::Atom(var), Sexp::Atom(colon), arg] => {
                                 if colon.string(text) != ":" {
@@ -548,6 +542,18 @@ fn test_parse() -> Result<()> {
     run_test_expr("abc", &[var(0, 3)])?;
     run_test_expr("(f x)", &[app((1, 4), var(1, 2), var(3, 4))])?;
     run_test_expr(
+        "(f x y)",
+        &[app((1, 6), app((1, 4), var(1, 2), var(3, 4)), var(5, 6))],
+    )?;
+    run_test_expr(
+        "((x:*) -> x)",
+        &[lambda((0, 12), (2, 3), star(4, 5), var(10, 11))],
+    )?;
+    run_test_expr(
+        "((_:x) => x)",
+        &[forall((0, 12), (2, 3), var(4, 5), var(10, 11))],
+    )?;
+    run_test_expr(
         "((x : ((A : *) => A)) -> y)",
         &[lambda(
             (0, 27),
@@ -555,10 +561,6 @@ fn test_parse() -> Result<()> {
             forall((6, 20), (8, 9), star(12, 13), var(18, 19)),
             var(25, 26),
         )],
-    )?;
-    run_test_expr(
-        "(f x y)",
-        &[app((1, 6), app((1, 4), var(1, 2), var(3, 4)), var(5, 6))],
     )?;
     run_test_expr(
         "((T : *) => (x : T) -> x)",
@@ -569,8 +571,6 @@ fn test_parse() -> Result<()> {
             lambda((12, 24), (13, 14), var(17, 18), var(23, 24)),
         )],
     )?;
-    run_test_expr("(x -> x)", &[lambda((0, 8), (1, 2), star(1, 2), var(6, 7))])?;
-    run_test_expr("(x => x)", &[forall((0, 8), (0, 0), var(1, 2), var(6, 7))])?;
 
     run_test_actions(
         "define x : * = P
@@ -866,7 +866,7 @@ fn run(text: &str) -> Result<()> {
 #[test]
 fn test_run() -> Result<()> {
     run("
-        define Unit : *    = ((T : *)      T  => T)
+        define Unit : *    = ((T : *) (_ : T) => T)
         define unit : Unit = ((T : *) (x : T) -> x)
         assert unit unit
     ")?;

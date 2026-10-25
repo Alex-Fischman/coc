@@ -409,42 +409,67 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct Decl(Span, Span, Box<Expr>, Box<Expr>);
-
-fn parse_decl(text: &str, [var, colon, arg, equals, val]: &[Sexp; 5]) -> Result<Decl> {
-    let span = Span {
-        lo: var.span().lo,
-        hi: val.span().hi,
-    };
-    let Sexp::Atom(var) = var else {
-        return err!(text, var.span(), "expected variable name");
-    };
-    if colon.span().string(text) != ":" {
-        return err!(text, colon.span(), "expected colon");
-    }
-    let arg = Box::new(parse_expr(text, arg)?);
-    if equals.span().string(text) != "=" {
-        return err!(text, equals.span(), "expected equals");
-    }
-    let val = Box::new(parse_expr(text, val)?);
-    Ok(Decl(span, *var, arg, val))
+enum Action {
+    Define(Span, Span, Box<Expr>, Box<Expr>),
+    Assert(Span, Box<Expr>, Box<Expr>),
 }
 
-fn parse_decls(text: &str) -> Result<Vec<Decl>> {
+fn parse_actions(text: &str) -> Result<Vec<Action>> {
     let tokens = tokenize(text);
-    let sexps = sexpify(&tokens, text)?;
-    let (sexps, extra) = sexps.as_chunks();
+    let mut sexps = sexpify(&tokens, text)?;
+    sexps.reverse();
 
-    let decls = sexps
-        .iter()
-        .map(|sexps| parse_decl(text, sexps))
-        .collect::<Result<Vec<_>>>()?;
+    let mut actions = Vec::new();
+    while let Some(action) = sexps.pop() {
+        match action.span().string(text) {
+            "define" => {
+                let Some(Sexp::Atom(var)) = sexps.pop() else {
+                    return err!(text, action.span(), "expected variable name");
+                };
+                if sexps.pop().is_some_and(|x| x.span().string(text) != ":") {
+                    return err!(text, action.span(), "expected colon");
+                }
+                let Some(arg) = sexps.pop().map(|x| parse_expr(text, &x)).transpose()? else {
+                    return err!(text, action.span(), "expected variable type");
+                };
+                if sexps.pop().is_some_and(|x| x.span().string(text) != "=") {
+                    return err!(text, action.span(), "expected equals");
+                }
+                let Some(val) = sexps.pop().map(|x| parse_expr(text, &x)).transpose()? else {
+                    return err!(text, action.span(), "expected variable value");
+                };
 
-    if let Some(sexp) = extra.first() {
-        return err!(text, sexp.span(), "unexpected");
+                let span = Span {
+                    lo: action.span().lo,
+                    hi: val.span().hi,
+                };
+                actions.push(Action::Define(span, var, Box::new(arg), Box::new(val)));
+            }
+            "assert" => {
+                let Some(x) = sexps
+                    .pop()
+                    .map(|sexp| parse_expr(text, &sexp))
+                    .transpose()?
+                else {
+                    return err!(text, action.span(), "expected value");
+                };
+                let Some(y) = sexps
+                    .pop()
+                    .map(|sexp| parse_expr(text, &sexp))
+                    .transpose()?
+                else {
+                    return err!(text, action.span(), "expected two values");
+                };
+                let span = Span {
+                    lo: action.span().lo,
+                    hi: y.span().hi,
+                };
+                actions.push(Action::Assert(span, Box::new(x), Box::new(y)));
+            }
+            _ => return err!(text, action.span(), "expected define or assert"),
+        }
     }
-
-    Ok(decls)
+    Ok(actions)
 }
 
 #[test]
@@ -482,13 +507,13 @@ fn test_parse() -> Result<()> {
         };
         Expr::Forall(Span { lo, hi }, var, Box::new(arg), Box::new(ret))
     }
-    fn decl(
+    fn define(
         (lo, hi): (usize, usize),
         (var_lo, var_hi): (usize, usize),
         arg: Expr,
         val: Expr,
-    ) -> Decl {
-        Decl(
+    ) -> Action {
+        Action::Define(
             Span { lo, hi },
             Span {
                 lo: var_lo,
@@ -497,6 +522,9 @@ fn test_parse() -> Result<()> {
             Box::new(arg),
             Box::new(val),
         )
+    }
+    fn assert((lo, hi): (usize, usize), x: Expr, y: Expr) -> Action {
+        Action::Assert(Span { lo, hi }, Box::new(x), Box::new(y))
     }
 
     fn run_test_expr(text: &str, expected_exprs: &[Expr]) -> Result<()> {
@@ -510,9 +538,9 @@ fn test_parse() -> Result<()> {
         Ok(())
     }
 
-    fn run_test_decl(text: &str, expected_decls: &[Decl]) -> Result<()> {
-        let actual_decls = parse_decls(text)?;
-        assert_eq!(expected_decls, actual_decls);
+    fn run_test_actions(text: &str, expected_actions: &[Action]) -> Result<()> {
+        let actual_actions = parse_actions(text)?;
+        assert_eq!(expected_actions, actual_actions);
         Ok(())
     }
 
@@ -544,16 +572,19 @@ fn test_parse() -> Result<()> {
     run_test_expr("(x -> x)", &[lambda((0, 8), (1, 2), star(1, 2), var(6, 7))])?;
     run_test_expr("(x => x)", &[forall((0, 8), (0, 0), var(1, 2), var(6, 7))])?;
 
-    run_test_decl(
-        " x : * = P   y : P = ((z : P) => z) ",
+    run_test_actions(
+        "define x : * = P
+         define y : P = ((z : P) => z)
+         assert x y",
         &[
-            decl((1, 10), (1, 2), star(5, 6), var(9, 10)),
-            decl(
-                (13, 35),
-                (13, 14),
-                var(17, 18),
-                forall((21, 35), (23, 24), var(27, 28), var(33, 34)),
+            define((0, 16), (7, 8), star(11, 12), var(15, 16)),
+            define(
+                (26, 55),
+                (33, 34),
+                var(37, 38),
+                forall((41, 55), (43, 44), var(47, 48), var(53, 54)),
             ),
+            assert((65, 75), var(72, 73), var(74, 75)),
         ],
     )?;
 
@@ -666,16 +697,16 @@ impl Expr {
                 let rhs_string = rhs_var.string(state.text);
                 equal_vars
                     .iter()
-                    .find(|(lhs, rhs)| {
+                    .find_map(|(lhs, rhs)| {
                         let lhs_matches = *lhs == lhs_string;
                         let rhs_matches = *rhs == rhs_string;
                         match (lhs_matches, rhs_matches) {
-                            (true, true) => true,
-                            (false, false) => false,
-                            (true, false) | (false, true) => panic!("is_alpha_eq"),
+                            (false, false) => None,
+                            (true, true) => Some(true),
+                            (true, false) | (false, true) => Some(false),
                         }
                     })
-                    .is_some()
+                    .expect("unbound variable")
             }
 
             (Expr::App(_, lhs_f, lhs_x), Expr::App(_, rhs_f, rhs_x)) => {
@@ -786,19 +817,45 @@ fn run(text: &str) -> Result<()> {
     println!();
 
     let mut state = State::new(text);
-    for Decl(span, var, arg, val) in parse_decls(text)? {
-        let expected = arg.beta_reduce(&mut state)?;
-        let inferred = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
-        if Expr::is_alpha_eq(&state, &expected, &inferred, &mut Vec::new()) {
-            state.push(var, Some(*val), expected);
-        } else {
-            let expected = expected.to_string(state.text);
-            let inferred = inferred.to_string(state.text);
-            return err!(
-                state.text,
-                span,
-                "declaration did not typecheck\nexpected: {expected}\ninferred: {inferred}"
-            );
+    for action in parse_actions(text)? {
+        match action {
+            Action::Define(span, var, arg, val) => {
+                let expected = arg.beta_reduce(&mut state)?;
+                let inferred = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
+                if Expr::is_alpha_eq(&state, &expected, &inferred, &mut Vec::new()) {
+                    state.push(var, Some(*val), expected);
+                } else {
+                    let expected = expected.to_string(state.text);
+                    let inferred = inferred.to_string(state.text);
+                    return err!(
+                        state.text,
+                        span,
+                        "declaration did not typecheck\nexpected: {expected}\ninferred: {inferred}"
+                    );
+                }
+            }
+            Action::Assert(span, x, y) => {
+                let x_type = x.typecheck(&mut state)?.beta_reduce(&mut state)?;
+                let y_type = y.typecheck(&mut state)?.beta_reduce(&mut state)?;
+                if !Expr::is_alpha_eq(&state, &x_type, &y_type, &mut Vec::new()) {
+                    let x = x.to_string(state.text);
+                    let y = y.to_string(state.text);
+                    let x_type = x_type.to_string(state.text);
+                    let y_type = y_type.to_string(state.text);
+                    return err!(
+                        state.text,
+                        span,
+                        "assert arguments had different types\n{x}\n: {x_type}\n{y}\n: {y_type}"
+                    );
+                }
+                let x = x.beta_reduce(&mut state)?;
+                let y = y.beta_reduce(&mut state)?;
+                if !Expr::is_alpha_eq(&state, &x, &y, &mut Vec::new()) {
+                    let x = x.to_string(state.text);
+                    let y = y.to_string(state.text);
+                    return err!(state.text, span, "assertion failed\n{x}\n{y}");
+                }
+            }
         }
     }
 
@@ -809,8 +866,9 @@ fn run(text: &str) -> Result<()> {
 #[test]
 fn test_run() -> Result<()> {
     run("
-        Unit : *    = ((T : *)      T  => T)
-        unit : Unit = ((T : *) (x : T) -> x)
+        define Unit : *    = ((T : *)      T  => T)
+        define unit : Unit = ((T : *) (x : T) -> x)
+        assert unit unit
     ")?;
 
     Ok(())

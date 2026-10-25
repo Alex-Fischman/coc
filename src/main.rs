@@ -277,20 +277,35 @@ fn test_sexpify() -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Var {
+    Real(Span),
+    Hole(Span),
+}
+
+impl Var {
+    fn string<'a>(&self, text: &'a str) -> &'a str {
+        match self {
+            Var::Real(span) => span.string(text),
+            Var::Hole(_) => "_",
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum Expr {
     Type(Span),
-    Var(Span),
+    Var(Var),
     App(Span, Box<Expr>, Box<Expr>),
-    Lambda(Span, Span, Box<Expr>, Box<Expr>),
-    Forall(Span, Span, Box<Expr>, Box<Expr>),
+    Lambda(Span, Var, Box<Expr>, Box<Expr>),
+    Forall(Span, Var, Box<Expr>, Box<Expr>),
 }
 
 impl Expr {
     fn span(&self) -> Span {
         match self {
             Expr::Type(span)
-            | Expr::Var(span)
+            | Expr::Var(Var::Real(span) | Var::Hole(span))
             | Expr::App(span, ..)
             | Expr::Lambda(span, ..)
             | Expr::Forall(span, ..) => *span,
@@ -322,7 +337,8 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
     Ok(match sexp {
         Sexp::Atom(span) => match span.string(text) {
             "*" => Expr::Type(*span),
-            _ => Expr::Var(*span),
+            "_" => Expr::Var(Var::Hole(*span)),
+            _ => Expr::Var(Var::Real(*span)),
         },
         Sexp::List(span, list) => {
             let mut init_groups = Vec::new();
@@ -363,17 +379,25 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
                 while let Some(binding) = bindings.pop() {
                     let (var, arg) = match binding {
                         Sexp::Atom(span) => {
-                            if is_lambda {
-                                return err!(text, span, "expected binding");
-                            }
-                            (Span { lo: 0, hi: 0 }, Box::new(Expr::Var(*span)))
+                            let real = Var::Real(*span);
+                            let hole = Var::Hole(*span);
+                            let (var, arg) = if is_lambda {
+                                (real, hole)
+                            } else {
+                                (hole, real)
+                            };
+                            (var, Box::new(Expr::Var(arg)))
                         }
                         Sexp::List(span, list) => match &list[..] {
                             [Sexp::Atom(var), Sexp::Atom(colon), arg] => {
+                                let var = match var.string(text) {
+                                    "_" => Var::Hole(*var),
+                                    _ => Var::Real(*var),
+                                };
                                 if colon.string(text) != ":" {
                                     return err!(text, span, "expected colon");
                                 }
-                                (*var, Box::new(parse_expr(text, arg)?))
+                                (var, Box::new(parse_expr(text, arg)?))
                             }
                             _ => return err!(text, span, "expected binding"),
                         },
@@ -442,46 +466,26 @@ fn parse_decls(text: &str) -> Result<Vec<Decl>> {
 
 #[test]
 fn test_parse() -> Result<()> {
+    fn real(lo: usize, hi: usize) -> Var {
+        Var::Real(Span { lo, hi })
+    }
+    fn hole(lo: usize, hi: usize) -> Var {
+        Var::Hole(Span { lo, hi })
+    }
     fn star(lo: usize, hi: usize) -> Expr {
         Expr::Type(Span { lo, hi })
     }
     fn var(lo: usize, hi: usize) -> Expr {
-        Expr::Var(Span { lo, hi })
+        Expr::Var(real(lo, hi))
     }
     fn app((lo, hi): (usize, usize), f: Expr, x: Expr) -> Expr {
         Expr::App(Span { lo, hi }, Box::new(f), Box::new(x))
     }
-    fn lambda(
-        (lo, hi): (usize, usize),
-        (var_lo, var_hi): (usize, usize),
-        arg: Expr,
-        ret: Expr,
-    ) -> Expr {
-        Expr::Lambda(
-            Span { lo, hi },
-            Span {
-                lo: var_lo,
-                hi: var_hi,
-            },
-            Box::new(arg),
-            Box::new(ret),
-        )
+    fn lambda((lo, hi): (usize, usize), var: Var, arg: Expr, ret: Expr) -> Expr {
+        Expr::Lambda(Span { lo, hi }, var, Box::new(arg), Box::new(ret))
     }
-    fn forall(
-        (lo, hi): (usize, usize),
-        (var_lo, var_hi): (usize, usize),
-        arg: Expr,
-        ret: Expr,
-    ) -> Expr {
-        Expr::Forall(
-            Span { lo, hi },
-            Span {
-                lo: var_lo,
-                hi: var_hi,
-            },
-            Box::new(arg),
-            Box::new(ret),
-        )
+    fn forall((lo, hi): (usize, usize), var: Var, arg: Expr, ret: Expr) -> Expr {
+        Expr::Forall(Span { lo, hi }, var, Box::new(arg), Box::new(ret))
     }
     fn decl(
         (lo, hi): (usize, usize),
@@ -524,8 +528,8 @@ fn test_parse() -> Result<()> {
         "((x : ((A : *) => A)) -> y)",
         &[lambda(
             (0, 27),
-            (2, 3),
-            forall((6, 20), (8, 9), star(12, 13), var(18, 19)),
+            real(2, 3),
+            forall((6, 20), real(8, 9), star(12, 13), var(18, 19)),
             var(25, 26),
         )],
     )?;
@@ -537,10 +541,18 @@ fn test_parse() -> Result<()> {
         "((T : *) => (x : T) -> x)",
         &[forall(
             (0, 25),
-            (2, 3),
+            real(2, 3),
             star(6, 7),
-            lambda((12, 24), (13, 14), var(17, 18), var(23, 24)),
+            lambda((12, 24), real(13, 14), var(17, 18), var(23, 24)),
         )],
+    )?;
+    run_test_expr(
+        "(x -> x)",
+        &[lambda((0, 8), real(1, 2), Expr::Var(hole(1, 2)), var(6, 7))],
+    )?;
+    run_test_expr(
+        "(T => T)",
+        &[forall((0, 8), hole(1, 2), var(1, 2), var(6, 7))],
     )?;
 
     run_test_decl(
@@ -551,7 +563,7 @@ fn test_parse() -> Result<()> {
                 (13, 35),
                 (13, 14),
                 var(17, 18),
-                forall((21, 35), (23, 24), var(27, 28), var(33, 34)),
+                forall((21, 35), real(23, 24), var(27, 28), var(33, 34)),
             ),
         ],
     )?;
@@ -577,12 +589,27 @@ impl State<'_> {
         State { text, context }
     }
 
-    fn push(&mut self, var: Span, val: Option<Expr>, typ: Expr) {
-        self.context.push((var.string(self.text), val, typ));
+    fn push(&mut self, var: Var, val: Option<Expr>, typ: Expr) {
+        match var {
+            Var::Real(var) => self.context.push((var.string(self.text), val, typ)),
+            Var::Hole(_) => {}
+        }
     }
 
-    fn pop(&mut self) {
-        self.context.pop();
+    fn pop(&mut self, var: Var) -> Result<()> {
+        match var {
+            Var::Real(var) => {
+                let Some((key, _val, _typ)) = self.context.pop() else {
+                    return err!(self.text, var, "bug: nothing to pop");
+                };
+                if key == var.string(self.text) {
+                    Ok(())
+                } else {
+                    err!(self.text, var, "bug: did not pop the right variable")
+                }
+            }
+            Var::Hole(_) => Ok(()),
+        }
     }
 
     fn find_value(&self, var: Span) -> Result<Expr> {
@@ -590,7 +617,7 @@ impl State<'_> {
         for (key, val, _typ) in &self.context {
             if var_ == *key {
                 return Ok(match val {
-                    None => Expr::Var(var),
+                    None => Expr::Var(Var::Real(var)),
                     Some(val) => val.clone(),
                 });
             }
@@ -613,7 +640,10 @@ impl Expr {
     fn beta_reduce(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
             Expr::Type(span) => Expr::Type(*span),
-            Expr::Var(var) => state.find_value(*var)?,
+            Expr::Var(Var::Real(var)) => state.find_value(*var)?,
+            Expr::Var(Var::Hole(span)) => {
+                return err!(state.text, span, "fell in hole during reduction");
+            }
             Expr::App(span, f, x) => {
                 let f = f.beta_reduce(state)?;
                 let x = x.beta_reduce(state)?;
@@ -621,7 +651,7 @@ impl Expr {
                     Expr::Lambda(_, var, arg, ret) => {
                         state.push(var, Some(x), *arg);
                         let ret = ret.beta_reduce(state)?;
-                        state.pop();
+                        state.pop(var)?;
                         ret
                     }
                     _ => Expr::App(*span, Box::new(f), Box::new(x)),
@@ -631,14 +661,14 @@ impl Expr {
                 let arg = arg.beta_reduce(state)?;
                 state.push(*var, None, arg.clone());
                 let ret = ret.beta_reduce(state)?;
-                state.pop();
+                state.pop(*var)?;
                 Expr::Lambda(*span, *var, Box::new(arg), Box::new(ret))
             }
             Expr::Forall(span, var, arg, ret) => {
                 let arg = arg.beta_reduce(state)?;
                 state.push(*var, None, arg.clone());
                 let ret = ret.beta_reduce(state)?;
-                state.pop();
+                state.pop(*var)?;
                 Expr::Forall(*span, *var, Box::new(arg), Box::new(ret))
             }
         })
@@ -697,7 +727,10 @@ impl Expr {
     fn typecheck(&self, state: &mut State) -> Result<Expr> {
         Ok(match self {
             Expr::Type(span) => return err!(state.text, span, "no type for *"),
-            Expr::Var(var) => state.find_type(*var)?,
+            Expr::Var(Var::Real(var)) => state.find_type(*var)?,
+            Expr::Var(Var::Hole(span)) => {
+                return err!(state.text, span, "fell in hole during typechecking");
+            }
             Expr::App(span, f, x) => {
                 let f_type = f.typecheck(state)?.beta_reduce(state)?;
                 let x_type = x.typecheck(state)?.beta_reduce(state)?;
@@ -705,7 +738,7 @@ impl Expr {
                     if Self::is_alpha_eq(state, &arg, &x_type, &mut Vec::new()) {
                         state.push(var, Some(*x.clone()), x_type);
                         let ret = ret.beta_reduce(state)?;
-                        state.pop();
+                        state.pop(var)?;
                         ret
                     } else {
                         let f = f.to_string(state.text);
@@ -731,13 +764,13 @@ impl Expr {
             Expr::Lambda(span, var, arg, ret) => {
                 state.push(*var, None, *arg.clone());
                 let ret = ret.typecheck(state)?;
-                state.pop();
+                state.pop(*var)?;
                 Expr::Forall(*span, *var, arg.clone(), Box::new(ret))
             }
             Expr::Forall(_, var, arg, ret) => {
                 state.push(*var, None, *arg.clone());
                 let ret = ret.typecheck(state)?;
-                state.pop();
+                state.pop(*var)?;
                 ret
             }
         })
@@ -782,7 +815,7 @@ fn run(text: &str) -> Result<()> {
         let expected = arg.beta_reduce(&mut state)?;
         let inferred = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
         if Expr::is_alpha_eq(&state, &expected, &inferred, &mut Vec::new()) {
-            state.push(var, Some(*val), expected);
+            state.push(Var::Real(var), Some(*val), expected);
         } else {
             let expected = expected.to_string(state.text);
             let inferred = inferred.to_string(state.text);
@@ -801,7 +834,7 @@ fn run(text: &str) -> Result<()> {
 #[test]
 fn test_run() -> Result<()> {
     run("
-        Unit : * = ((T : *) (_ : T) => T)
+        Unit : *    = ((T : *)      T  => T)
         unit : Unit = ((T : *) (x : T) -> x)
     ")?;
 

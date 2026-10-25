@@ -1,7 +1,7 @@
-Unit : *    = ((T : *) (_ : T) => T)
+Unit : *    = ((T : *)      T  => T)
 unit : Unit = ((T : *) (x : T) -> x)
 
-Bool  : *    = ((A : *) (_ : A) (_ : A) => A)
+Bool  : *    = ((A : *)      A       A  => A)
 false : Bool = ((A : *) (0 : A) (_ : A) -> 0)
 true  : Bool = ((A : *) (_ : A) (1 : A) -> 1)
 

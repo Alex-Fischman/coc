@@ -404,7 +404,7 @@ fn parse_expr(text: &str, sexp: &Sexp) -> Result<Expr> {
 
 #[derive(Clone, Debug, PartialEq)]
 enum Action {
-    Define(Span, Span, Box<Expr>, Box<Expr>),
+    Define(Span, Span, Box<Expr>),
     Assert(Span, Box<Expr>, Box<Expr>),
 }
 
@@ -423,35 +423,20 @@ fn parse_actions(text: &str) -> Result<Vec<Action>> {
                 if sexps.pop().is_some_and(|x| x.span().string(text) != ":") {
                     return err!(text, action.span(), "expected colon");
                 }
-                let Some(arg) = sexps.pop().map(|x| parse_expr(text, &x)).transpose()? else {
-                    return err!(text, action.span(), "expected variable type");
-                };
-                if sexps.pop().is_some_and(|x| x.span().string(text) != "=") {
-                    return err!(text, action.span(), "expected equals");
-                }
                 let Some(val) = sexps.pop().map(|x| parse_expr(text, &x)).transpose()? else {
                     return err!(text, action.span(), "expected variable value");
                 };
-
                 let span = Span {
                     lo: action.span().lo,
                     hi: val.span().hi,
                 };
-                actions.push(Action::Define(span, var, Box::new(arg), Box::new(val)));
+                actions.push(Action::Define(span, var, Box::new(val)));
             }
             "assert" => {
-                let Some(x) = sexps
-                    .pop()
-                    .map(|sexp| parse_expr(text, &sexp))
-                    .transpose()?
-                else {
+                let Some(x) = sexps.pop().map(|x| parse_expr(text, &x)).transpose()? else {
                     return err!(text, action.span(), "expected value");
                 };
-                let Some(y) = sexps
-                    .pop()
-                    .map(|sexp| parse_expr(text, &sexp))
-                    .transpose()?
-                else {
+                let Some(y) = sexps.pop().map(|x| parse_expr(text, &x)).transpose()? else {
                     return err!(text, action.span(), "expected two values");
                 };
                 let span = Span {
@@ -501,19 +486,13 @@ fn test_parse() -> Result<()> {
         };
         Expr::Forall(Span { lo, hi }, var, Box::new(arg), Box::new(ret))
     }
-    fn define(
-        (lo, hi): (usize, usize),
-        (var_lo, var_hi): (usize, usize),
-        arg: Expr,
-        val: Expr,
-    ) -> Action {
+    fn define((lo, hi): (usize, usize), (var_lo, var_hi): (usize, usize), val: Expr) -> Action {
         Action::Define(
             Span { lo, hi },
             Span {
                 lo: var_lo,
                 hi: var_hi,
             },
-            Box::new(arg),
             Box::new(val),
         )
     }
@@ -573,18 +552,17 @@ fn test_parse() -> Result<()> {
     )?;
 
     run_test_actions(
-        "define x : * = P
-         define y : P = ((z : P) => z)
+        "define x: P
+         define y: ((z : P) => z)
          assert x y",
         &[
-            define((0, 16), (7, 8), star(11, 12), var(15, 16)),
+            define((0, 11), (7, 8), var(10, 11)),
             define(
-                (26, 55),
-                (33, 34),
-                var(37, 38),
-                forall((41, 55), (43, 44), var(47, 48), var(53, 54)),
+                (21, 45),
+                (28, 29),
+                forall((31, 45), (33, 34), var(37, 38), var(43, 44)),
             ),
-            assert((65, 75), var(72, 73), var(74, 75)),
+            assert((55, 65), var(62, 63), var(64, 65)),
         ],
     )?;
 
@@ -819,20 +797,9 @@ fn run(text: &str) -> Result<()> {
     let mut state = State::new(text);
     for action in parse_actions(text)? {
         match action {
-            Action::Define(span, var, arg, val) => {
-                let expected = arg.beta_reduce(&mut state)?;
-                let inferred = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
-                if Expr::is_alpha_eq(&state, &expected, &inferred, &mut Vec::new()) {
-                    state.push(var, Some(*val), expected);
-                } else {
-                    let expected = expected.to_string(state.text);
-                    let inferred = inferred.to_string(state.text);
-                    return err!(
-                        state.text,
-                        span,
-                        "declaration did not typecheck\nexpected: {expected}\ninferred: {inferred}"
-                    );
-                }
+            Action::Define(_span, var, val) => {
+                let typ = val.typecheck(&mut state)?.beta_reduce(&mut state)?;
+                state.push(var, Some(*val), typ);
             }
             Action::Assert(span, x, y) => {
                 let x_type = x.typecheck(&mut state)?.beta_reduce(&mut state)?;
@@ -866,8 +833,8 @@ fn run(text: &str) -> Result<()> {
 #[test]
 fn test_run() -> Result<()> {
     run("
-        define Unit : *    = ((T : *) (_ : T) => T)
-        define unit : Unit = ((T : *) (x : T) -> x)
+        define Unit: ((T : *) (_ : T) => T)
+        define unit: ((T : *) (x : T) -> x)
         assert unit unit
     ")?;
 

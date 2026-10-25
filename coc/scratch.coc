@@ -1,20 +1,12 @@
-define Unit : *    = ((A:*) (a:A) => A)
-define unit : Unit = ((A:*) (a:A) -> a)
+define Unit: ((A:*) (a:A) => A)
+define unit: ((A:*) (a:A) -> a)
 
-define Bool  : *    = ((A:*) (_:A) (_:A) => A)
-define false : Bool = ((A:*) (0:A) (_:A) -> 0)
-define true  : Bool = ((A:*) (_:A) (1:A) -> 1)
+define Bool:  ((A:*) (_:A) (_:A) => A)
+define false: ((A:*) (0:A) (_:A) -> 0)
+define true:  ((A:*) (_:A) (1:A) -> 1)
 
-define not
-: ((_:Bool) => Bool)
-= ((a:Bool) -> a Bool true false)
-
-define and
-: ((_:Bool) (_:Bool) => Bool)
-= ((a:Bool) (b:Bool) -> a Bool false b)
-
-define or
-: ((_:Bool) (_:Bool) => Bool)
-= ((a:Bool) (b:Bool) -> a Bool b true)
+define not: ((a:Bool)          -> a Bool true false)
+define and: ((a:Bool) (b:Bool) -> a Bool false b)
+define or:  ((a:Bool) (b:Bool) -> a Bool b true)
 
 assert (and true (or false true)) true

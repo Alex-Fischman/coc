@@ -1,3 +1,6 @@
+Unit : * = ((A:*) A => A)
+unit : Unit = (A (a:A) -> a)
+
 Bool : * = ((A:*) A A => A)
 false : Bool = ( A (0:A) (_:A) -> 0)
 true  : Bool = ( A (_:A) (1:A) -> 1)

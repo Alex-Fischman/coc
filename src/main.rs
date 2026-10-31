@@ -734,7 +734,7 @@ impl Expr {
                         (true, false) | (false, true) => Some(false),
                     }
                 })
-                .expect("bug: unbound variable"),
+                .unwrap_or(lhs_var.index == rhs_var.index),
 
             (Expr::App(_, lhs_f, lhs_x), Expr::App(_, rhs_f, rhs_x)) => {
                 let f_eq = Self::is_alpha_eq(lhs_f, rhs_f, equal_vars);

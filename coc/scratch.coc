@@ -12,3 +12,7 @@ define and: ((a:Bool) (b:Bool) -> a Bool false b)
 define or:  ((a:Bool) (b:Bool) -> a Bool b true)
 
 assert (and true (or false true)) true
+
+define Nat: ((A:*) (_:A) (_:((_:A) => A)) => A)
+define 0:   ((A:*) (0:A) (_:((_:A) => A)) -> 0)
+define 1:   ((A:*) (0:A) (1:((_:A) => A)) -> 1 0)

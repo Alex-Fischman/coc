@@ -347,7 +347,7 @@ fn parse_expr<'a>(
     var_count: &mut usize,
 ) -> Result<Expr> {
     fn resolve_var<'a>(text: &'a str, span: Span, vars: &mut Vec<(&'a str, usize)>) -> Result<Var> {
-        match vars.iter().find_map(|(key, index)| {
+        match vars.iter().rev().find_map(|(key, index)| {
             if *key == span.string(text) {
                 Some(*index)
             } else {
@@ -663,7 +663,7 @@ impl State<'_> {
     }
 
     fn find_value(&self, var: Var) -> Result<Expr> {
-        for (key, val, _typ) in &self.context {
+        for (key, val, _typ) in self.context.iter().rev() {
             if var.index == *key {
                 return Ok(match val {
                     None => Expr::Var(var),
@@ -675,7 +675,7 @@ impl State<'_> {
     }
 
     fn find_type(&self, var: Var) -> Result<Expr> {
-        for (key, _val, typ) in &self.context {
+        for (key, _val, typ) in self.context.iter().rev() {
             if var.index == *key {
                 return Ok(typ.clone());
             }

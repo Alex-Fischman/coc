@@ -16,3 +16,10 @@ assert (and true (or false true)) true
 define Nat: ((A:*) (_:A) (_:((_:A) => A)) => A)
 define 0:   ((A:*) (0:A) (_:((_:A) => A)) -> 0)
 define 1:   ((A:*) (0:A) (1:((_:A) => A)) -> 1 0)
+define 2:   ((A:*) (0:A) (1:((_:A) => A)) -> 1 (1 0))
+define 3:   ((A:*) (0:A) (1:((_:A) => A)) -> 1 (1 (1 0)))
+
+define zero: 0
+define succ: ((n:Nat) (A:*) (0:A) (1:((_:A) => A)) -> n A (1 0) 1)
+
+assert 3 (succ (succ (succ zero)))

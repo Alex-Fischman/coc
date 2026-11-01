@@ -346,19 +346,6 @@ fn parse_expr<'a>(
     vars: &mut Vec<(&'a str, usize)>,
     var_count: &mut usize,
 ) -> Result<Expr> {
-    fn resolve_var<'a>(text: &'a str, span: Span, vars: &mut Vec<(&'a str, usize)>) -> Result<Var> {
-        match vars.iter().rev().find_map(|(key, index)| {
-            if *key == span.string(text) {
-                Some(*index)
-            } else {
-                None
-            }
-        }) {
-            Some(index) => Ok(Var { span, index }),
-            None => err!(text, span, "unbound variable"),
-        }
-    }
-
     fn parse_arrow_groups<'a>(
         text: &'a str,
         span: Span,
@@ -430,7 +417,16 @@ fn parse_expr<'a>(
     Ok(match sexp {
         Sexp::Atom(span) => match span.string(text) {
             "*" => Expr::Star(*span),
-            _ => Expr::Var(resolve_var(text, *span, vars)?),
+            _ => match vars.iter().rev().find_map(|(key, index)| {
+                if *key == span.string(text) {
+                    Some(*index)
+                } else {
+                    None
+                }
+            }) {
+                Some(index) => Expr::Var(Var { span: *span, index }),
+                None => return err!(text, span, "unbound variable"),
+            },
         },
         Sexp::List(span, list) => {
             let mut init_groups = Vec::new();

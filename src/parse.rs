@@ -69,28 +69,39 @@ impl Expr {
     }
 }
 
-struct State<'a> {
+pub struct ParseState<'a> {
     text: &'a str,
     vars: Vec<(&'a str, usize)>,
     var_count: usize,
 }
 
-impl State<'_> {
-    fn new(text: &str) -> State<'_> {
-        State {
+impl ParseState<'_> {
+    #[must_use]
+    pub fn new(text: &str) -> ParseState<'_> {
+        ParseState {
             text,
             vars: Vec::new(),
             var_count: 0,
         }
     }
 
-    fn var(&mut self, span: Span, is_hole: bool) -> Var {
+    fn var(&mut self, span: Span) -> Var {
         let index = self.var_count;
         self.var_count += 1;
         Var {
             span,
             index,
-            is_hole,
+            is_hole: false,
+        }
+    }
+
+    fn hole(&mut self, span: Span) -> Var {
+        let index = self.var_count;
+        self.var_count += 1;
+        Var {
+            span,
+            index,
+            is_hole: true,
         }
     }
 
@@ -119,113 +130,96 @@ impl State<'_> {
     }
 }
 
-fn parse_expr(sexp: &Sexp, state: &mut State) -> Result<Expr> {
-    fn parse_arrow_groups(
-        span: Span,
-        state: &mut State,
-        mut init_groups: Vec<(bool, Vec<&Sexp>)>,
-        last_group: Vec<&Sexp>,
-    ) -> Result<Expr> {
-        let Some((is_lambda, first_group)) = init_groups.last_mut() else {
-            return last_group
+fn parse_binding(span: Span, list: Vec<Sexp>, state: &mut ParseState) -> Result<(Span, Var, Expr)> {
+    let Ok([Sexp::Atom(var), Sexp::Atom(colon), arg]) = TryInto::<[Sexp; 3]>::try_into(list) else {
+        return err!(state.text, span, "expected binding");
+    };
+
+    if colon.to_str(state.text) != ":" {
+        return err!(state.text, colon, "expected colon");
+    }
+
+    Ok((span, state.var(var), parse_expr(arg, state)?))
+}
+
+pub fn parse_expr(sexp: Sexp, state: &mut ParseState) -> Result<Expr> {
+    Ok(match sexp {
+        Sexp::Atom(span) => match span.to_str(state.text) {
+            "*" => Expr::Star(span),
+            _ => Expr::Var(state.find(span)?),
+        },
+        Sexp::List(span, list) => {
+            // (binding+ arrow)* expr+
+            let mut binding_sexps = Vec::new();
+            let mut tail = Vec::new();
+            for sexp in list {
+                match sexp {
+                    Sexp::Atom(span) if span.to_str(state.text) == "->" => {
+                        for binding in tail {
+                            binding_sexps.push((true, binding));
+                        }
+                        tail = Vec::new();
+                    }
+                    Sexp::Atom(span) if span.to_str(state.text) == "=>" => {
+                        for binding in tail {
+                            binding_sexps.push((false, binding));
+                        }
+                        tail = Vec::new();
+                    }
+                    _ => tail.push(sexp),
+                }
+            }
+
+            let mut bindings = Vec::new();
+            for (is_lambda, binding) in binding_sexps {
+                let (span, var, arg) = match (is_lambda, binding) {
+                    (true, Sexp::Atom(span)) => {
+                        (span, state.var(span), Expr::Var(state.hole(span)))
+                    }
+                    (false, Sexp::Atom(span)) => {
+                        (span, state.hole(span), parse_expr(Sexp::Atom(span), state)?)
+                    }
+                    (true, Sexp::List(span, list)) => parse_binding(span, list, state)?,
+                    (false, Sexp::List(span, list)) => {
+                        if list.len() == 3 && list[1].span().to_str(state.text) == ":" {
+                            parse_binding(span, list, state)?
+                        } else {
+                            let arg = parse_expr(Sexp::List(span, list), state)?;
+                            (span, state.hole(span), arg)
+                        }
+                    }
+                };
+
+                bindings.push((is_lambda, span, var, arg));
+                state.push(var);
+            }
+
+            let mut expr = tail
                 .into_iter()
                 .map(|sexp| parse_expr(sexp, state))
                 .reduce(|f, x| match (f, x) {
                     (Err(err), _) | (_, Err(err)) => Err(err),
-                    (Ok(f), Ok(x)) => {
-                        let span = Span {
-                            lo: f.span().lo,
-                            hi: x.span().hi,
-                        };
-                        Ok(Expr::App(span, Box::new(f), Box::new(x)))
-                    }
+                    (Ok(f), Ok(x)) => Ok(Expr::App(
+                        f.span().through(x.span()),
+                        Box::new(f),
+                        Box::new(x),
+                    )),
                 })
-                .unwrap_or_else(|| err!(state.text, span, "expected expression"));
-        };
+                .unwrap_or_else(|| err!(state.text, span, "expected expression"))?;
 
-        let Some(binding) = first_group.pop() else {
-            init_groups.pop();
-            return parse_arrow_groups(span, state, init_groups, last_group);
-        };
+            for (is_lambda, binding_span, var, arg) in bindings.into_iter().rev() {
+                let span = binding_span.through(expr.span());
 
-        let is_lambda = *is_lambda;
-        let binding_span = binding.span();
-
-        let (var, arg, ret) = match binding {
-            Sexp::Atom(atom_span) => {
-                if is_lambda {
-                    let var = state.var(*atom_span, false);
-                    let arg = Expr::Var(state.var(*atom_span, true));
-
-                    state.push(var);
-                    let ret = parse_arrow_groups(span, state, init_groups, last_group)?;
-                    state.pop(var);
-
-                    (var, arg, ret)
+                expr = if is_lambda {
+                    Expr::Lambda(span, var, Box::new(arg), Box::new(expr))
                 } else {
-                    let var = state.var(*atom_span, true);
-                    let arg = Expr::Var(state.var(*atom_span, false));
-                    let ret = parse_arrow_groups(span, state, init_groups, last_group)?;
-                    (var, arg, ret)
-                }
+                    Expr::Forall(span, var, Box::new(arg), Box::new(expr))
+                };
+
+                state.pop(var);
             }
-            Sexp::List(list_span, list) => match &list[..] {
-                [Sexp::Atom(var_span), Sexp::Atom(colon), arg] => {
-                    if colon.to_str(state.text) != ":" {
-                        return err!(state.text, list_span, "expected colon");
-                    }
 
-                    let var = state.var(*var_span, false);
-                    let arg = parse_expr(arg, state)?;
-
-                    state.push(var);
-                    let ret = parse_arrow_groups(span, state, init_groups, last_group)?;
-                    state.pop(var);
-
-                    (var, arg, ret)
-                }
-                _ => return err!(state.text, span, "expected binding"),
-            },
-        };
-
-        let span = Span {
-            lo: binding_span.lo,
-            hi: ret.span().hi,
-        };
-
-        Ok(if is_lambda {
-            Expr::Lambda(span, var, Box::new(arg), Box::new(ret))
-        } else {
-            Expr::Forall(span, var, Box::new(arg), Box::new(ret))
-        })
-    }
-
-    Ok(match sexp {
-        Sexp::Atom(span) => match span.to_str(state.text) {
-            "*" => Expr::Star(*span),
-            _ => Expr::Var(state.find(*span)?),
-        },
-        Sexp::List(span, list) => {
-            let mut init_groups = Vec::new();
-            let mut last_group = Vec::new();
-            for sexp in list {
-                match sexp {
-                    Sexp::Atom(span) if span.to_str(state.text) == "->" => {
-                        last_group.reverse();
-                        init_groups.push((true, last_group));
-                        last_group = Vec::new();
-                    }
-                    Sexp::Atom(span) if span.to_str(state.text) == "=>" => {
-                        last_group.reverse();
-                        init_groups.push((false, last_group));
-                        last_group = Vec::new();
-                    }
-                    _ => last_group.push(sexp),
-                }
-            }
-            init_groups.reverse();
-            let mut expr = parse_arrow_groups(*span, state, init_groups, last_group)?;
-            *expr.span_mut() = *span;
+            *expr.span_mut() = span;
             expr
         }
     })
@@ -233,63 +227,67 @@ fn parse_expr(sexp: &Sexp, state: &mut State) -> Result<Expr> {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
-    Define(Span, Var, Box<Expr>),
-    Assert(Span, Box<Expr>, Box<Expr>),
+    Define(Span, Var, Expr, Expr),
+    Assert(Span, Expr, Expr),
 }
 
 pub fn parse_actions(text: &str) -> Result<Vec<Action>> {
     let tokens = tokenize(text);
     let mut sexps = sexpify(&tokens, text)?;
 
-    let mut state = State::new(text);
+    let mut state = ParseState::new(text);
     let mut actions = Vec::new();
 
     sexps.reverse();
     while let Some(action) = sexps.pop() {
         match action.span().to_str(text) {
             "define" => {
-                let Some(Sexp::Atom(var_span)) = sexps.pop() else {
+                let Some(Sexp::Atom(var)) = sexps.pop() else {
                     return err!(text, action.span(), "expected variable name");
                 };
-                if sexps.pop().is_some_and(|x| x.span().to_str(text) != ":") {
+                let var = state.var(var);
+
+                let Some(Sexp::Atom(colon)) = sexps.pop() else {
                     return err!(text, action.span(), "expected colon");
+                };
+                if colon.to_str(text) != ":" {
+                    return err!(text, colon, "expected colon");
                 }
-                let Some(val) = sexps
-                    .pop()
-                    .map(|x| parse_expr(&x, &mut state))
-                    .transpose()?
-                else {
+
+                let Some(typ) = sexps.pop() else {
+                    return err!(text, action.span(), "expected variable type");
+                };
+                let typ = parse_expr(typ, &mut state)?;
+
+                let Some(Sexp::Atom(equals)) = sexps.pop() else {
+                    return err!(text, action.span(), "expected equals");
+                };
+                if equals.to_str(text) != "=" {
+                    return err!(text, equals, "expected equals");
+                }
+
+                let Some(val) = sexps.pop() else {
                     return err!(text, action.span(), "expected variable value");
                 };
-                let span = Span {
-                    lo: action.span().lo,
-                    hi: val.span().hi,
-                };
+                let val = parse_expr(val, &mut state)?;
 
-                let var = state.var(var_span, false);
+                let span = action.span().through(val.span());
+                actions.push(Action::Define(span, var, typ, val));
                 state.push(var);
-                actions.push(Action::Define(span, var, Box::new(val)));
             }
             "assert" => {
-                let Some(x) = sexps
-                    .pop()
-                    .map(|x| parse_expr(&x, &mut state))
-                    .transpose()?
-                else {
+                let Some(x) = sexps.pop() else {
                     return err!(text, action.span(), "expected value");
                 };
-                let Some(y) = sexps
-                    .pop()
-                    .map(|x| parse_expr(&x, &mut state))
-                    .transpose()?
-                else {
+                let x = parse_expr(x, &mut state)?;
+
+                let Some(y) = sexps.pop() else {
                     return err!(text, action.span(), "expected two values");
                 };
-                let span = Span {
-                    lo: action.span().lo,
-                    hi: y.span().hi,
-                };
-                actions.push(Action::Assert(span, Box::new(x), Box::new(y)));
+                let y = parse_expr(y, &mut state)?;
+
+                let span = action.span().through(y.span());
+                actions.push(Action::Assert(span, x, y));
             }
             _ => return err!(text, action.span(), "expected define or assert"),
         }
@@ -325,17 +323,17 @@ fn test_parse() -> Result<()> {
     fn forall((lo, hi): (usize, usize), var: Var, arg: Expr, ret: Expr) -> Expr {
         Expr::Forall(Span { lo, hi }, var, Box::new(arg), Box::new(ret))
     }
-    fn define((lo, hi): (usize, usize), var: Var, val: Expr) -> Action {
-        Action::Define(Span { lo, hi }, var, Box::new(val))
+    fn define((lo, hi): (usize, usize), var: Var, typ: Expr, val: Expr) -> Action {
+        Action::Define(Span { lo, hi }, var, typ, val)
     }
     fn assert((lo, hi): (usize, usize), x: Expr, y: Expr) -> Action {
-        Action::Assert(Span { lo, hi }, Box::new(x), Box::new(y))
+        Action::Assert(Span { lo, hi }, x, y)
     }
 
     fn run_test_expr(text: &str, expected_expr: &Expr) -> Result<()> {
         let tokens = tokenize(text);
         let actual_sexp = sexpify(&tokens, text)?.remove(0);
-        let actual_expr = parse_expr(&actual_sexp, &mut State::new(text))?;
+        let actual_expr = parse_expr(actual_sexp, &mut ParseState::new(text))?;
         assert_eq!(expected_expr, &actual_expr);
         Ok(())
     }
@@ -383,17 +381,18 @@ fn test_parse() -> Result<()> {
     )?;
 
     run_test_actions(
-        "define x: *
-         define y: ((z : *) => z)
+        "define x : * = *
+         define y : x = ((z : *) => z)
          assert x y",
         &[
-            define((0, 11), var(7, 8, 0), star(10, 11)),
+            define((0, 16), var(7, 8, 0), star(11, 12), star(15, 16)),
             define(
-                (21, 45),
-                var(28, 29, 2),
-                forall((31, 45), var(33, 34, 1), star(37, 38), evar(43, 44, 1)),
+                (26, 55),
+                var(33, 34, 1),
+                evar(37, 38, 0),
+                forall((41, 55), var(43, 44, 2), star(47, 48), evar(53, 54, 2)),
             ),
-            assert((55, 65), evar(62, 63, 0), evar(64, 65, 2)),
+            assert((65, 75), evar(72, 73, 0), evar(74, 75, 1)),
         ],
     )?;
 

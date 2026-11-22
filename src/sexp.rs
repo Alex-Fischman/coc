@@ -22,23 +22,17 @@ pub fn sexpify(tokens: &[Token], text: &str) -> Result<Vec<Sexp>> {
     for Token(token_type, span) in tokens {
         match token_type {
             TokenType::OpenParen => {
-                stack.push((span, level));
+                stack.push((level, span));
                 level = Vec::new();
             }
             TokenType::CloseParen => {
-                let Some((left_span, prev_level)) = stack.pop() else {
+                let Some((prev_level, left_span)) = stack.pop() else {
                     return err!(text, span, "extra close paren");
                 };
 
-                let list = level;
+                let list = Sexp::List(left_span.through(*span), level);
                 level = prev_level;
-
-                let span = Span {
-                    lo: left_span.lo,
-                    hi: span.hi,
-                };
-
-                level.push(Sexp::List(span, list));
+                level.push(list);
             }
             TokenType::Identifier => level.push(Sexp::Atom(*span)),
         }
@@ -46,7 +40,7 @@ pub fn sexpify(tokens: &[Token], text: &str) -> Result<Vec<Sexp>> {
 
     match stack.pop() {
         None => Ok(level),
-        Some((span, _)) => err!(text, span, "unclosed open paren"),
+        Some((_, span)) => err!(text, span, "unclosed open paren"),
     }
 }
 
